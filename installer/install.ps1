@@ -451,20 +451,6 @@ function Step($what, [scriptblock]$do) {
   if (-not $DryRun) { & $do }
 }
 
-$pnpAll = @(Get-PnpDevice -PresentOnly)
-if (-not ($pnpAll | Where-Object { $_.InstanceId -match $SupportedCardPattern })) {
-  # Naming the cards is a courtesy: if reading the adapters or formatting
-  # fails, the refusal is still made, with the earlier one-line message.
-  $refusal = $null
-  try {
-    $adapters = @()
-    try { $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop) } catch { }
-    $refusal = Format-UnsupportedCardMessage (Select-WirelessDevices $pnpAll $adapters)
-  } catch { }
-  if (-not $refusal) { $refusal = $NoSupportedCard }
-  throw $refusal
-}
-
 'Files'
 # Every process running from the install folder, not only ours by name: the
 # AirDrop engine is the bundled python.exe started by nekodrop.exe, and killing
