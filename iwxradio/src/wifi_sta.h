@@ -31,10 +31,11 @@ struct StaConfig {
   bool open = false;
   std::string tap;        /* TAP adapter name or GUID; empty: the first */
   unsigned max_width = 80;
-  /* Receive Block Ack sessions with the AP. Off by default until the host
-   * reorders by BAID/NSSN as Linux does: requests are declined (status 37)
-   * and the AP sends unaggregated (Codex review #24, agreed fix). */
-  bool block_ack = false;
+  /* Receive Block Ack sessions with the AP, reordered on the host by
+   * BAID/NSSN as Linux does (rx_reorder.h). ba=0 declines them (status 37)
+   * and the AP sends unaggregated, which costs the air the AWDL listener
+   * shares with it (Concurrent mode). */
+  bool block_ack = true;
 
   /* key=value lines: ssid, bssid, channel, passphrase, psk, open, tap, width, ba. */
   bool load(const std::string &path, std::string &error);

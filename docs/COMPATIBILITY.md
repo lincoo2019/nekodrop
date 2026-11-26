@@ -28,8 +28,9 @@ nekodrop drives the Wi-Fi chip directly from user mode so Windows can speak Appl
 | Intel Wireless-AC 9560 / 9462 / 9461 (Qu/QuZ CNVi) | same as AX201 | `Qu/QuZ-jf-b0-68` | Concurrent & On-Demand | ⚠️ Built-in, untested |
 | Intel Wi-Fi 6E AX411 / Killer AX1690 (CNVi) | same as AX211 | `so-a0-gf4-a0-68` + PNVM | Concurrent & On-Demand | ⚠️ Built-in, untested ([#7](../../../issues/7)) |
 | Intel Wi-Fi 6 AX203 / 9560 (So CNVi) | same as AX211 | `so-a0-hr/jf-b0-68` | Concurrent & On-Demand | ⚠️ Built-in, untested |
+| **Intel Wi-Fi 6 AX203** (Bz, Arrow Lake CNVi) | `7740` | linux-firmware `bz-b0-hr-b0-100` + PNVM, MLD | Concurrent & On-Demand | ✅ **Tested on hardware**: two-way AirDrop with a Mac |
 | Intel Meteor Lake `Ma` / `SnJ` | `7E40` `2729` `2726` | `ma-b0` (`linux-firmware`) | Concurrent & On-Demand | 🚧 Planned (high priority) |
-| **Intel Wi-Fi 7 BE200** (`bz`/`gl`) | `272B` | API 100, MLD | Concurrent & On-Demand | 🧪 **Built-in, experimental, not yet run on a real card** ([BE200.md](BE200.md)); BE201/BE211 CNVi (`A840` `7740` `E440`) need CNVi hardware |
+| **Intel Wi-Fi 7 BE200** (`bz`/`gl`) | `272B` | API 100, MLD | Concurrent & On-Demand | 🧪 **Built-in, experimental, not yet run on a real card** ([BE200.md](BE200.md)); BE201/BE211 CNVi (`A840` `E440`) need CNVi hardware |
 | Legacy Intel 9260 (`2526`) / 8th–9th gen 9560 (`9DF0`/`A370`) | `2526` `9DF0` `A370` | `iwm` legacy FH DMA | — | ❌ Not supported (`hal_iwm` has no AWDL) |
 
 ---

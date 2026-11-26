@@ -34,6 +34,9 @@
  * contract: shared with KernelDevice and future backends, which need none of
  * the headers above. */
 #include "radio_backend.h"
+/* Host-side Block Ack receive reordering (rx_reorder.h; RxFrame comes from
+ * radio_backend.h above). */
+#include "rx_reorder.h"
 
 class IwxDevice {
 public:
@@ -46,7 +49,8 @@ public:
   /* Everything radio_main may call on this backend (radio_backend.h). */
   static constexpr RadioCapabilities kCapabilities = radio::iwx_capabilities();
 
-  explicit IwxDevice(Logger log) : _log(std::move(log)) {}
+  explicit IwxDevice(Logger log)
+      : _log(std::move(log)), _reorder([this](const RxFrame &f) { emit_rx(f); }) {}
   ~IwxDevice();
 
   /* Opens the card, boots its firmware and runs the init sequence. */
@@ -62,7 +66,17 @@ public:
    * a firmware station for the peer, bound to the listener, and an immediate
    * BA agreement on `tid`. The firmware then answers aggregates by itself. */
   bool add_rx_ba(const uint8_t peer[6], unsigned tid, uint16_t ssn, uint16_t window, uint8_t token);
-  bool remove_rx_ba(unsigned tid);
+  /* `peer` null: the TID's sessions with every peer. */
+  bool remove_rx_ba(unsigned tid, const uint8_t *peer = nullptr);
+  /* On Bz the listener is never promiscuous (the firmware then stops matching
+   * ACKs to its own unicast), so set_promiscuous is a no-op there. */
+  bool bz_card() const { return _card.bz; }
+  /* Bz with --mac-type sta: keeps a session protection running so the
+   * unassociated BSS_STA listener link has the radio. Call often; no-op
+   * otherwise. */
+  bool keep_on_channel();
+  /* Host-side Block Ack reordering counters (rx_reorder.h). */
+  const RxReorder::Stats &reorder_stats() const { return _reorder.stats(); }
   /* Experimental A-MPDU sending to one AWDL peer (ForbiddenItlwm's
    * -itlawdlcoexbatx): the peer's firmware station (the one receive Block Ack
    * uses), an aggregation queue on TID 0 and firmware rate control for it. */
@@ -265,12 +279,30 @@ private:
   int mld_sta_cfg_ap(bool assoc);
   int mld_sec_key_remove(uint32_t key_id, uint32_t key_flags);
   int disable_queue(uint8_t sta_id, uint8_t tid);
+  /* Bz receive Block Ack: one firmware station per AWDL peer (stations
+   * IWX_BZ_PEER_STA_ID..), and the firmware's BAID allocation/release. */
+  int bz_peer_station(const uint8_t peer[6]);
+  void bz_peer_drop(unsigned slot);
+  void bz_recount_ba_tids();
+  int bz_baid_add(unsigned sta_id, unsigned tid, uint16_t ssn, uint16_t window, uint32_t &baid);
+  int bz_baid_remove(uint32_t baid, unsigned tid, unsigned sta_id);
+  int bz_session_protect(unsigned link_id, unsigned mac_id, uint32_t duration_tu);
+  std::string bz_boot_regs(); /* FSEQ/IML/ROM status; caller holds nic_lock */
+  /* 0: healthy, 1: firmware/DMA error, 2: the device dropped off the bus.
+   * `what` describes the registers when not healthy. On Bz the old SW_ERR
+   * position (CSR_INT bit 25) rises by itself and is only noted and cleared. */
+  int fw_error_state(std::string &what);
+  bool _bz_bit25_logged = false;
 
   /* Receive */
   void post_rx_buf(unsigned index); /* iwx_update_rx_desc */
   void handle_rb(unsigned index);
   void handle_packet(const uint8_t *pkt, size_t len);
   void handle_mpdu(const uint8_t *payload, size_t len, bool rada);
+  /* A received MPDU into Block Ack reordering, then up (emit_rx). */
+  void rx_in(const RxFrame &f, uint32_t reorder_data, bool amsdu, bool last_subframe);
+  void emit_rx(const RxFrame &f);
+  void sta_reorder_close_all();
   void handle_tx_resp(const uint8_t *payload, size_t len, unsigned slot);
   int transmit_on(TxRing &ring, const uint8_t *frame, size_t len, const TxRate &rate, bool encrypt,
                   bool kick = true);
@@ -294,16 +326,21 @@ private:
   struct DeferredRx {
     std::vector<uint8_t> frame;
     RxFrame meta;
+    bool raw = false; /* straight from the card: reordering still to do */
+    uint32_t reorder_data = 0;
+    bool amsdu = false, last_subframe = false;
   };
   std::deque<DeferredRx> _deferred_rx;
   unsigned _cmd_depth = 0;
   void deliver_deferred();
+  RxReorder _reorder;
   Options _opt;
   RegProxy _proxy;
   DmaPool _dma;
   Firmware _fw;
 
   uint32_t _hw_rev = 0, _hw_rev_raw = 0, _hw_rf_id = 0;
+  uint32_t _hw_rev_step = 0; /* Bz: MAC step from CNVI_AUX_MISC_CHIP (start_hw) */
   CardInfo _card;
   bool _integrated = true;
   std::string _fw_name;
@@ -374,6 +411,27 @@ private:
   bool _promisc = true;
   bool _ba_station = false;
   uint8_t _ba_peer[6] = {}, _ba_tids = 0, _ba_token[8] = {};
+  /* Bz: one firmware station per AWDL Block Ack peer (IWX_BZ_PEER_STA_ID..),
+   * so peers taking turns keep their sessions; the least recently used goes
+   * when another arrives. */
+  struct BzPeer {
+    bool used = false;
+    uint8_t addr[6] = {};
+    uint8_t valid = 0; /* TIDs with a BAID */
+    uint8_t token[8] = {};
+    uint32_t baid[8] = {};
+    uint64_t last_us = 0;
+  };
+  static constexpr unsigned kBzPeers = 4;
+  BzPeer _bz_peers[kBzPeers];
+  unsigned _ba_logged = 0, _ba_rm_logged = 0;
+  /* The listener link's session protection on Bz. */
+  bool _session_on = false;
+  uint64_t _session_sent_us = 0;
+  unsigned _session_logged = 0;
+  /* The station link beside the listener (--mac-type sta): its protection. */
+  bool _sta_session_on = false;
+  uint64_t _sta_join_us = 0, _sta_session_sent_us = 0;
   uint32_t _chan_flags[256] = {};
   bool _notice_pending = false;
   uint16_t _notice_mcc = 0, _answered_mcc = 0;

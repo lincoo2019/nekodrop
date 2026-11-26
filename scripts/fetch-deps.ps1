@@ -31,6 +31,17 @@ Get-Repo 'winawdl\upstream\devourer' https://github.com/raph559/devourer.git 8d9
 Get-Repo ForbiddenItlwm https://github.com/retropineaple/ForbiddenItlwm.git 96ff71e0211789239f6fbf6b64ac8e7fd22b41aa
 Get-Repo WirDrop https://github.com/JungyoKim/WirDrop.git 7c5308ca7fb9ee3d375e4c4ca93f7f9d6a7542a6
 
+# Bz-hr firmware for the AX203 on Arrow Lake (8086:7740), which ForbiddenItlwm
+# does not carry: iwlwifi-bz-b0-hr-b0-100 (core 97, the newest for this RF; the
+# file's "100" is the packaging version) from linux-firmware (Intel licence).
+$fwDir = Join-Path $tp 'firmware'
+New-Item -ItemType Directory -Force $fwDir | Out-Null
+Get-File 'https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/intel/iwlwifi/iwlwifi-bz-b0-hr-b0-100.ucode' `
+         "$fwDir\iwlwifi-bz-b0-hr-b0-100.ucode" '589ACC51DD2753BE24C0355AF8074A72A43DBABCBF2A34D709F7D8AAE4FFC2ED'
+Get-File 'https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/intel/iwlwifi/iwlwifi-bz-b0-hr-b0.pnvm' `
+         "$fwDir\iwlwifi-bz-b0-hr-b0.pnvm" '9C6BFCD07D6E15711EB8E5E7ABA83018999C2D65079FE38997641001C0A46EEB'
+'iwlwifi-bz-b0-hr-b0-100.ucode + pnvm (Bz-hr, AX203)'
+
 # MT7902 firmware: three files, not a clone of all of linux-firmware. From its
 # GitLab copy: git.kernel.org answers scripts with a bot check page.
 $lfw = 'a1ebb5ad7eae3caca60b8b3db5792cf43339ba58'

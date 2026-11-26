@@ -25,7 +25,7 @@ $ErrorActionPreference = 'Continue'
 # Self-contained (never reads %ProgramFiles%\nekodrop). Keep $SupportedIntelIds
 # in step with iwxradio/src/cards.h, app/service/CardCatalog.cs,
 # driver/regproxy/winawdl_regproxy.inf, installer/report.ps1 and install.ps1.
-$SupportedIntelIds = @('43F0', 'A0F0', '02F0', '06F0', '34F0', '3DF0', '4DF0', '2723', '2725', '7A70', '7AF0', '51F0', '51F1', '54F0', '7F70')
+$SupportedIntelIds = @('43F0', 'A0F0', '02F0', '06F0', '34F0', '3DF0', '4DF0', '2723', '2725', '7A70', '7AF0', '51F0', '51F1', '54F0', '7F70', '7740')
 $KnownCatalogIds = @($SupportedIntelIds | ForEach-Object { "8086:$_" }) + @('8086:272B', '10EC:C852')
 $ProxyInfNames = @('winawdl_regproxy.inf', 'nekodrop-wlan.inf')
 $ProxyServices = @('WUDFRd', 'nekodrop-wlan')
@@ -115,7 +115,7 @@ function Test-DeviceBoundToNekodrop($Device, [string[]]$NekodropPublishedInfs) {
 #   1. any present PCI device currently bound to nekodrop's proxy or kernel
 #      driver (WUDFRd / nekodrop-wlan AND our published INF or provider, never
 #      unrelated UMDF devices such as sensors or HID);
-#   2. else any of the 15 supported Intel PCI IDs (identical to earlier builds);
+#   2. else any of the 16 supported Intel PCI IDs (identical to earlier builds);
 #   3. else any other known catalog PCI ID (such as Realtek 10EC:C852).
 function Resolve-RestoreTargetDevice($Devices, [string[]]$NekodropPublishedInfs = @()) {
   $pciDevs = @($Devices | Where-Object { $_ -and (Get-PciVendorDevice $_.InstanceId) })
@@ -237,7 +237,7 @@ if ($SelfTest) {
   }
 
   # 1. Supported Intel IDs and strict 4-hex boundary check.
-  if ($SupportedIntelIds.Count -ne 15) { $fail += "expected 15 Intel IDs, got $($SupportedIntelIds.Count)" }
+  if ($SupportedIntelIds.Count -ne 16) { $fail += "expected 16 Intel IDs, got $($SupportedIntelIds.Count)" }
   foreach ($d in $SupportedIntelIds) {
     $id = "PCI\VEN_8086&DEV_$d&SUBSYS_00748086&REV_00\3&11583659&0&A3"
     $pci = Get-PciVendorDevice $id

@@ -36,7 +36,7 @@ constexpr bool rf_cdb(uint32_t rf_id) { return (rf_id >> 28) & 1; }
 
 /* The PCI device IDs nekodrop binds to (the register proxy's INF lists the same). */
 constexpr uint16_t kDeviceIds[] = {0x02F0, 0x06F0, 0x34F0, 0x3DF0, 0x4DF0, 0x43F0, 0xA0F0, 0x2723,
-                                   0x2725, 0x7A70, 0x7AF0, 0x51F0, 0x51F1, 0x54F0, 0x7F70};
+                                   0x2725, 0x7A70, 0x7AF0, 0x51F0, 0x51F1, 0x54F0, 0x7F70, 0x7740};
 
 /* --family <name>: a representative device ID of each family, for a card
  * the user matched to a model by hand (Settings, "Wi-Fi card"). The keys are
@@ -75,6 +75,9 @@ inline CardInfo select(uint16_t device, uint32_t hw_rev, uint32_t rf_id) {
   case 0x272B: /* iwl_gl_mac_cfg: discrete BE200 (Bz family, experimental) */
     c.ax210 = true; c.bz = true; c.integrated = false;
     c.xtal_latency = 12000; c.low_latency_xtal = true; break;
+  case 0x7740: /* iwl_bz_mac_cfg: Bz on Arrow Lake (AX203) */
+    c.ax210 = true; c.bz = true;
+    c.xtal_latency = 12000; c.ltr_delay = kLtr2500; c.low_latency_xtal = true; break;
   case 0x2720: c.why = "Intel QnJ (8086:2720): its firmware (QuQnj, API 48) is not shipped upstream"; return c;
   case 0x2726: c.why = "Intel SnJ (8086:2726): its firmware (SoSnj, API 63) is not shipped upstream"; return c;
   case 0x2729: case 0x7E40: c.why = "Intel Ma (Meteor Lake CNVi): its firmware (ma, API 63) is not shipped upstream"; return c;
@@ -129,6 +132,23 @@ inline CardInfo select(uint16_t device, uint32_t hw_rev, uint32_t rf_id) {
     } else {
       c.why = "unknown radio type " + std::to_string(rf) + " on a Gl MAC"; return c;
     }
+  } else if (c.bz) { /* Bz MAC (0x46) on the Arrow Lake AX203 (device 0x7740) */
+    if (mac != 0x46) {
+      c.why = "a non-Bz MAC (" + std::to_string(mac) + ") on a Bz device ID";
+      return c;
+    }
+    if (!hr) {
+      c.why = "Bz with RF type " + std::to_string(rf) + ", only the HR radio (AX203) is ported";
+      return c;
+    }
+    /* Intel's Bz firmware for the HR radio. The file's "100" is the packaging
+     * version; its core is 97, the newest published for this RF. It brings its
+     * own image loader (IML). A PNVM ships as iwlwifi-bz-b0-hr-b0.pnvm and is
+     * loaded after ALIVE (Linux iwl_mld_run_fw_init_sequence). */
+    c.firmware = "iwlwifi-bz-b0-hr-b0-100.ucode";
+    c.pnvm = "iwlwifi-bz-b0-hr-b0.pnvm";
+    c.name = "Intel(R) Wi-Fi 6 AX203";
+    c.tested = true;
   } else {
     c.why = "MAC type " + std::to_string(mac) + " on device " + std::to_string(device) +
             " has no firmware upstream";

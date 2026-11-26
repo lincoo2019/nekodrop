@@ -108,6 +108,7 @@ int main(int argc, char **argv) {
       {0x51F0, 0x370, 0x1010d000, "iwlwifi-so-a0-gf4-a0-68.ucode", true, false, true},   /* AX411 */
       {0x272B, 0x470, 0x00112000, "iwlwifi-gl-c0-fm-c0-100.ucode", true, true, false},   /* BE200: discrete Gl/Fm */
       {0x272B, 0x470, 0x0010d000, nullptr, true, true, false},                           /* Gl with non-FM radio */
+      {0x7740, 0x460, 0x0010a000, "iwlwifi-bz-b0-hr-b0-100.ucode", true, true, true},     /* AX203 on Arrow Lake */
       {0x2726, 0x420, 0x0010d000, nullptr, true, false, true},                           /* SnJ: no firmware */
       {0x1234, 0x354, 0x0010a100, nullptr, false, false, true},
   };
@@ -127,6 +128,13 @@ int main(int argc, char **argv) {
       std::printf("FAIL BE200 transport parameters or family_device(\"be200\")\n");
       failures++;
     }
+  }
+  {
+    const CardInfo c = cards::select(0x7740, 0x460, 0x0010a000);
+    if (!c.known || !c.ax210 || !c.bz || !c.integrated || c.xtal_latency != 12000 ||
+        c.ltr_delay != IWX_SOC_FLAGS_LTR_APPLY_DELAY_2500 || !c.low_latency_xtal || !c.tested ||
+        c.pnvm != "iwlwifi-bz-b0-hr-b0.pnvm")
+      std::printf("FAIL AX203 (8086:7740) transport parameters, PNVM or tested flag\n"), failures++;
   }
   {
     const CardInfo c = cards::select(0x43F0, 0x354, 0x0010a100);

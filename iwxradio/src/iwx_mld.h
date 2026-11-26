@@ -27,8 +27,33 @@
 #define IWX_CSR_ADDR_BASE_BZ                            0x030u
 
 #define IWX_MSIX_HW_INT_CAUSES_REG_ALIVE                (1u << 0)
+/* Bz renumbers these: the image loader shares WAKEUP, and the firmware's own
+ * error is reported on bit 5 (Linux iwl-csr.h, Bz). */
+#define IWX_MSIX_HW_INT_CAUSES_REG_IML_BZ               (1u << 1)
 #define IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR_BZ            (1u << 5)
 #define IWX_MSIX_HW_INT_CAUSES_REG_HW_ERR               (1u << 29)
+
+/* A hint (legacy group) that frames held for Block Ack may go up to an NSSN. */
+#ifndef IWX_FRAME_RELEASE
+#define IWX_FRAME_RELEASE                               0xc3u
+#endif
+
+/* Bz boot diagnostics: the CNVi reports the MAC step, WFPM ownership and the
+ * four-phase handshake show who held the AUX bus, and the FSEQ/IML status is
+ * read when the ROM does not hand over to the firmware. */
+#define IWX_CNVI_AUX_MISC_CHIP                          (0xa200b0)
+#define IWX_CNVI_AUX_MISC_CHIP_MAC_STEP(_val)           (((_val) & 0xf000000) >> 24)
+#define IWX_CNVI_AUX_MISC_CHIP_PROD_TYPE(_val)          ((_val) & 0xfff)
+#define IWX_CNVI_AUX_MISC_CHIP_PROD_TYPE_BZ_U           (0x930)
+#define IWX_SD_REG_VER_GEN2                             (0xa2b800)
+#define IWX_SILICON_A_STEP                              0
+#define IWX_SILICON_B_STEP                              1
+#define IWX_WFPM_OTP_CFG1_ADDR                          (0xa03098)
+#define IWX_WFPM_RSRCS_4PHS_REQ_STTS                    (0xa033f8)
+#define IWX_WFPM_RSRCS_4PHS_ACK_STTS                    (0xa033fc)
+#define IWX_RSRC_CNVR_TOP                               (1u << 6)
+#define IWX_BZ_UREG_UMAC_CURRENT_PC1                    (0xa05c1c)
+#define IWX_BZ_UREG_LMAC1_CURRENT_PC                    (0xa05c20)
 
 #define IWX_TFD_QUEUE_BC_SIZE_BZ                        4096u
 #define IWX_IPC_DRAM_MAP_ENTRY_NUM_MAX                  32u
@@ -164,6 +189,10 @@ struct iwx_link_config_cmd {
 struct iwx_he_pkt_ext_v2 {
   uint8_t pkt_ext_qam_th[2][5][2];
 } __packed;
+
+/* First of the AWDL peers' station entries on the listener's link (0 and 1
+ * are taken by the monitor station and the AP beside the listener). */
+#define IWX_BZ_PEER_STA_ID                              2u
 
 /* STA_CMD_API_S_VER_1 (96 bytes) */
 struct iwx_sta_cfg_cmd_v1 {

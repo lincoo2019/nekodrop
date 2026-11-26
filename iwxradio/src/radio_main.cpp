@@ -35,6 +35,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #include "awdl_policy.h"
@@ -495,6 +496,10 @@ int main(int argc, char **argv) {
       if (opt.fast_unlock) have_country = radio::held_country(dev.current_country());
     }
     uint64_t rx_all = 0, rx_awdl = 0, rx_to_us = 0;
+    /* Data-type frames handed up by the backend (before the A-MPDU reorder is
+     * visible here they are already reordered); the split tells a receive
+     * stall inside the radio/reorder from one above. */
+    uint64_t rx_data = 0;
     /* AWDL action frames by subtype: a peer turns valid in awdld only after a
      * MIF (master indication), so PSF-only traffic explains "not valid yet"
      * (#16, AX211). */
@@ -524,7 +529,11 @@ int main(int argc, char **argv) {
       log_line(radio::format_discovery_milestone(what, GetTickCount64() - listen_ms, detail));
     };
     std::deque<awdl::AddbaRequest> addba_pending;
-    std::deque<uint8_t> delba_pending;
+    struct Delba {
+      uint8_t peer[6];
+      uint8_t tid;
+    };
+    std::deque<Delba> delba_pending;
     /* Experimental A-MPDU sending to one peer (ForbiddenItlwm's
      * -itlawdlcoexbatx, awdlCoexBaHandle and awdlCoexDataPump): a bulk send to
      * a peer gets its firmware station, an aggregation queue and our ADDBA
@@ -591,6 +600,37 @@ int main(int argc, char **argv) {
       return c / hz * 1000000ull + c % hz * 1000000ull / hz;
     };
     std::map<std::string, BssSeen> bss_seen;
+    /* Bz schedules nothing per station: an AWDL peer listens for us right
+     * after it transmits, and frames sent at other times go unacknowledged.
+     * Remember when each peer (frame address 2) was last heard, and hold
+     * unicast and multicast until then (2026-11-25). */
+    bool bz_card = false;
+    if constexpr (std::is_same_v<Dev, IwxDevice>) bz_card = dev.bz_card();
+    struct PeerHeard {
+      uint8_t addr[6] = {};
+      uint64_t us = 0;
+    };
+    PeerHeard peers[16];
+    unsigned peers_at = 0;
+    uint64_t peer_any_us = 0;
+    constexpr uint64_t kPeerWindowUS = 100000, kPeerHoldUS = 2000000;
+    const auto note_peer = [&](const uint8_t *a, uint64_t t) {
+      for (auto &p : peers)
+        if (p.us && std::memcmp(p.addr, a, 6) == 0) {
+          p.us = t;
+          peer_any_us = t;
+          return;
+        }
+      PeerHeard &p = peers[peers_at++ % (sizeof(peers) / sizeof(peers[0]))];
+      std::memcpy(p.addr, a, 6);
+      p.us = t;
+      peer_any_us = t;
+    };
+    const auto peer_age = [&](const uint8_t *a, uint64_t t) -> uint64_t {
+      for (const auto &p : peers)
+        if (p.us && std::memcmp(p.addr, a, 6) == 0) return t - p.us;
+      return UINT64_MAX;
+    };
     bool scan_wanted = false, scan_started = false;
     std::vector<uint8_t> scan_ssid;
     uint64_t scan_started_ms = 0;
@@ -602,6 +642,10 @@ int main(int argc, char **argv) {
         f.len = n;
         if (++rx_fcs == 1) log_line("rx: frames arrive with their FCS; removing it");
       }
+      if (bz_card && f.len >= 16 && !(f.data[10] & 1) &&
+          std::memcmp(f.data + 10, dev_address, 6) != 0)
+        note_peer(f.data + 10, now_us());
+      if (f.len >= 2 && (f.data[0] & 0x0c) == 0x08) rx_data++;
       if (f.len >= 36 && (f.data[0] == 0x80 || f.data[0] == 0x50)) { /* beacon, probe response */
         char key[18];
         std::snprintf(key, sizeof(key), "%02x:%02x:%02x:%02x:%02x:%02x", f.data[16], f.data[17], f.data[18],
@@ -756,7 +800,12 @@ int main(int argc, char **argv) {
         if (awdl::parse_addba_request(f.data, f.len, dev_address, &req)) {
           if (addba_pending.size() < 16) addba_pending.push_back(req);
         } else if (awdl::parse_delba(f.data, f.len, dev_address, &sender, &tid)) {
-          if (sender) delba_pending.push_back(tid);
+          if (sender) {
+            Delba d{};
+            std::memcpy(d.peer, f.data + 10, 6);
+            d.tid = tid;
+            if (delba_pending.size() < 16) delba_pending.push_back(d);
+          }
           else if (agg.on && tid == 0 && std::memcmp(f.data + 10, agg.peer, 6) == 0) agg.delba = true;
         } else if (agg.on && agg.step == Agg::Asking && awdl::parse_addba_answer(f.data, f.len, dev_address, &ans) &&
                    std::memcmp(f.data + 10, agg.peer, 6) == 0 && ans.token == agg.token && ans.tid == 0) {
@@ -830,8 +879,11 @@ int main(int argc, char **argv) {
       TxRate rate;
       bool data;
       awdl::UnicastRetry tx{};
+      uint64_t queued_us = 0; /* Bz: when it entered the queue (peer gating) */
     };
     std::deque<Unicast> uq;
+    /* Broadcast/multicast from the client, waiting for a peer to listen (Bz). */
+    std::deque<Unicast> mcastq;
     /* The firmware data ring holds 128 (AX210) / 256 entries. Sending one
      * frame and waiting for its TX-status reply serialises a round trip into
      * every packet (~1 ms), which caps an AWDL upload near 1 MB/s: a large
@@ -956,6 +1008,13 @@ int main(int argc, char **argv) {
       for (auto &f : uq) {
         auto &tx = f.tx;
         if (!tx.ready(now)) continue;
+        if (bz_card && f.data && f.frame.size() >= 10 && !(f.frame[4] & 1)) {
+          /* Wait for the peer's listening window, but never forever. */
+          if (!f.queued_us) f.queued_us = now;
+          const uint64_t age = peer_age(f.frame.data() + 4, now);
+          if (age != UINT64_MAX && age > kPeerWindowUS && now - f.queued_us < kPeerHoldUS)
+            continue;
+        }
         if (tx.expired(now)) {
           tx.abandon = true;
           gave_up++;
@@ -1049,6 +1108,17 @@ int main(int argc, char **argv) {
     Request req;
     while (!stopping() && dev.healthy()) {
       bool busy = dev.poll() > 0;
+      if (bz_card && !mcastq.empty()) {
+        /* In the peer's listening window, or after holding it long enough. */
+        const uint64_t t = now_us();
+        if ((peer_any_us && t - peer_any_us <= kPeerWindowUS) ||
+            t - mcastq.front().queued_us >= kPeerHoldUS) {
+          dev.transmit(mcastq.front().frame.data(), mcastq.front().frame.size(),
+                       mcastq.front().rate);
+          mcastq.pop_front();
+          busy = true;
+        }
+      }
       pipe.flush_send();
       for (int n = 0; n < 128 && (inbox.pop(req) || (pipe.pop_shm_tx(req.payload) && (req.type = RADIO_LINK_TX, true))); n++) {
         busy = true;
@@ -1116,7 +1186,12 @@ int main(int argc, char **argv) {
               if (agg.wait.size() >= kQueueLimit) agg.dropped++;
               else agg.wait.emplace_back(frame, frame + len);
             } else if (uq.size() >= kQueueLimit) uq_dropped++;
-            else uq.push_back({std::vector<uint8_t>(frame, frame + len), rate, data});
+            else uq.push_back({std::vector<uint8_t>(frame, frame + len), rate, data, {}, now_us()});
+          } else if (bz_card) {
+            /* Bz: a broadcast is heard by whoever is listening, right after a
+             * peer's own frame (sent from the main loop's tick). */
+            if (mcastq.size() >= 256) uq_dropped++;
+            else mcastq.push_back({std::vector<uint8_t>(frame, frame + len), rate, data, {}, now_us()});
           } else {
             dev.transmit(frame, len, rate);
           }
@@ -1169,7 +1244,10 @@ int main(int argc, char **argv) {
           }
         }
         while (!delba_pending.empty()) {
-          dev.remove_rx_ba(delba_pending.front());
+          if constexpr (std::is_same_v<Dev, IwxDevice>)
+            dev.remove_rx_ba(delba_pending.front().tid, delba_pending.front().peer);
+          else
+            dev.remove_rx_ba(delba_pending.front().tid);
           delba_pending.pop_front();
         }
       } else {
@@ -1479,6 +1557,9 @@ int main(int argc, char **argv) {
         }
         if (sta->state() != WifiStation::State::Running) busy = true;
       }
+      if constexpr (std::is_same_v<Dev, IwxDevice>) {
+        if (dev.keep_on_channel()) busy = true;
+      }
       if (pump()) busy = true;
       if (inflight > 0 || !uq.empty() || !agg.wait.empty() || agg_queued() > 0) busy = true;
       if (busy) {
@@ -1581,10 +1662,20 @@ int main(int argc, char **argv) {
         log_line("rx: " + std::to_string(rx_all) + " frames, " + std::to_string(rx_awdl) +
                  " AWDL action frames (" + std::to_string(rx_psf) + " PSF, " + std::to_string(rx_mif) +
                  " MIF; last " + std::to_string(awdl_dbm) + " dBm), " +
-                 std::to_string(rx_to_us) + " addressed to us" +
+                 std::to_string(rx_to_us) + " addressed to us, " + std::to_string(rx_data) +
+                 " data" +
                  (rx_fcs ? ", FCS removed " + std::to_string(rx_fcs) : "") +
                  (rx_mif_tail ? ", MIF bad tail " + std::to_string(rx_mif_tail) : "") +
                  (rx_mif_nover ? ", MIF without version " + std::to_string(rx_mif_nover) : ""));
+        if constexpr (std::is_same_v<Dev, IwxDevice>) {
+          const auto &ro = dev.reorder_stats();
+          if (ro.held || ro.dropped_old || ro.notifications)
+            log_line("reorder: " + std::to_string(ro.in_order) + " in order, " +
+                     std::to_string(ro.held) + " held, " + std::to_string(ro.released) +
+                     " released (" + std::to_string(ro.timed_out) + " by timeout), " +
+                     std::to_string(ro.dropped_old) + " old dropped, " +
+                     std::to_string(ro.notifications) + " release notifications");
+        }
         if (opt.coex_plan)
           log_line(std::string("coex plan: ") + (plan.active ? "active" : "inactive") + "; " +
                    std::to_string(plan.rewritten) + " sync frames rewritten, " + std::to_string(plan.silenced) +

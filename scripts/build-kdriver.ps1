@@ -52,7 +52,7 @@ $ucrt = Join-Path $kit "Include\$ver\ucrt"
 $env:INCLUDE = (@((Join-Path $msvc 'include'), $ucrt) + $inc) -join ';'
 $stl = '/DNEKO_KERNEL', '/D_HAS_EXCEPTIONS=0', '/D_HAS_STATIC_RTTI=0', '/D_ITERATOR_DEBUG_LEVEL=0',
        '/D_USE_STD_VECTOR_ALGORITHMS=0', '/D_CRT_SECURE_NO_WARNINGS', '/D_NO_CRT_STDIO_INLINE', '/DNOMINMAX', '/wd4996', '/wd4244', '/wd4815', '/wd4267'
-$hw = @('iwx.cpp', 'iwx_sta.cpp', 'iwx_scan.cpp', 'fw.cpp' | ForEach-Object { Join-Path $shared $_ }) +
+$hw = @('iwx.cpp', 'iwx_sta.cpp', 'iwx_scan.cpp', 'fw.cpp', 'rx_reorder.cpp' | ForEach-Object { Join-Path $shared $_ }) +
       @('kplat.cpp', 'kproxy.cpp', 'kdma.cpp', 'khal.cpp' | ForEach-Object { Join-Path $kdir $_ })
 & $tools.Cl @common @defs @stl "/I$kdir" "/I$shared" "/Fo$out\" @hw
 if ($LASTEXITCODE -ne 0) { throw "compile failed ($LASTEXITCODE)" }

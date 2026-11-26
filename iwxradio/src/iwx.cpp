@@ -15,11 +15,19 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <intrin.h>
 
 #include "iwxreg.h"
 #include "iwx_channel.h"
 
 namespace {
+
+/* The Bz firmware validates the peripheral scratch against the layout Linux
+ * uses: control 84 bytes, the DRAM map at 124, and the fseq tail included in
+ * version.size. */
+static_assert(sizeof(iwx_prph_scratch_ctrl_cfg) == 84, "prph scratch ctrl_cfg");
+static_assert(offsetof(iwx_prph_scratch, dram.common) == 124, "prph scratch DRAM map");
+static_assert(sizeof(iwx_prph_scratch) == 1724, "prph scratch total");
 
 /* struct ieee80211_frame is only used as a flexible array in the header. */
 /* The 22000 firmware walks every TFD queue as 256 entries whatever size it is
@@ -285,7 +293,9 @@ bool IwxDevice::alloc_rings(std::string &error) {
   /* What needs physically adjacent frames, in pages: each multi-page
    * firmware section, the descriptor rings, the receive lists and the PNVM. */
   const auto pages_of = [](size_t bytes) { return (bytes + DmaPool::kPageBytes - 1) / DmaPool::kPageBytes; };
-  const unsigned tx_count = gen3() ? kTxQueueSizeAx210 : kTxQueueSize22000;
+  /* Data rings stay 256 entries on Bz (its min_txq_size is 128, so 256 is
+   * accepted and is what the AX203 ran with on hardware); AX210 keeps 128. */
+  const unsigned tx_count = bz() ? kTxQueueSize22000 : gen3() ? kTxQueueSizeAx210 : kTxQueueSize22000;
   const unsigned cmd_count = gen3() ? IWX_CMD_QUEUE_SIZE_GEN3 : IWX_CMD_QUEUE_SIZE;
   const size_t rx_used_elem = bz()     ? sizeof(iwx_rx_completion_desc_bz)
                               : gen3() ? sizeof(iwx_rx_completion_desc)
@@ -541,20 +551,74 @@ bool IwxDevice::start_hw() {
     return false;
   }
   clear_persistence_bit();
-  sw_reset();
-  if (_integrated && !gen3()) {
-    setb(IWX_CSR_GP_CNTRL, IWX_CSR_GP_CNTRL_REG_FLAG_INIT_DONE);
-    delay_us(20);
-    if (!poll_bit(IWX_CSR_GP_CNTRL, IWX_CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY,
-                  IWX_CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY, 25000)) {
-      _log("timeout waiting for the clock before power gating");
+  if (bz()) {
+    /* Bz needs MAC_INIT before nic_lock, so apm_init runs once before the
+     * reset and once after. The AUX bus is claimed for the MAC before the
+     * reset (Linux get_crf_id leaves it held), and the CNVi
+     * reports the MAC step that CSR_HW_REV does not carry on Bz. */
+    if (!apm_init()) return false;
+    if (!nic_lock()) {
+      _log("Bz: MAC access failed before the reset");
       return false;
     }
-    force_power_gating();
-    setb(IWX_CSR_RESET, IWX_CSR_RESET_REG_FLAG_SW_RESET);
-    delay_us(5000);
+    const uint32_t wfpm_before = read_umac_prph(IWX_WFPM_CTRL_REG);
+    write_umac_prph(IWX_WFPM_CTRL_REG, wfpm_before | IWX_WFPM_AUX_CTL_AUX_IF_MAC_OWNER_MSK);
+    const uint32_t crf = read_prph(IWX_SD_REG_VER_GEN2);
+    const uint32_t cnv = read_prph(IWX_CNVI_AUX_MISC_CHIP);
+    const uint32_t otp = read_umac_prph(IWX_WFPM_OTP_CFG1_ADDR);
+    const uint32_t ps = read_umac_prph(IWX_WFPM_PS_CTL_CLR);
+    const uint32_t req4 = read_umac_prph(IWX_WFPM_RSRCS_4PHS_REQ_STTS);
+    const uint32_t ack4 = read_umac_prph(IWX_WFPM_RSRCS_4PHS_ACK_STTS);
+    const uint32_t wfpm_owned = read_umac_prph(IWX_WFPM_CTRL_REG);
+    const std::string boot_before = bz_boot_regs();
+    nic_unlock();
+    _log("Bz before reset: " + boot_before);
+    _hw_rev_step = IWX_CNVI_AUX_MISC_CHIP_MAC_STEP(cnv);
+    if (IWX_CNVI_AUX_MISC_CHIP_PROD_TYPE(cnv) == IWX_CNVI_AUX_MISC_CHIP_PROD_TYPE_BZ_U &&
+        _hw_rev_step == IWX_SILICON_A_STEP)
+      _hw_rev_step = IWX_SILICON_B_STEP;
+    _log("Bz before reset: WFPM_CTRL " + hex(wfpm_before) + " -> " + hex(wfpm_owned) +
+         ", otp " + hex(otp) + ", ps " + hex(ps) + ", 4phs req " + hex(req4) + " ack " +
+         hex(ack4));
+    _log("Bz: crf-id " + hex(crf) + ", cnv-id " + hex(cnv) + ", MAC step " +
+         std::to_string(_hw_rev_step) + " (CSR_HW_REV step " +
+         std::to_string(IWX_CSR_HW_REV_STEP(_hw_rev)) + ")");
+
+    setb(IWX_CSR_GP_CNTRL, IWX_CSR_GP_CNTRL_REG_FLAG_SW_RESET);
+    delay_us(10000);
+    if (!prepare_card_hw()) {
+      _log("the card did not come back after the Bz reset");
+      return false;
+    }
+    if (!apm_init()) return false;
+    if (nic_lock()) {
+      const uint32_t wfpm_after = read_umac_prph(IWX_WFPM_CTRL_REG);
+      const uint32_t req4_after = read_umac_prph(IWX_WFPM_RSRCS_4PHS_REQ_STTS);
+      const uint32_t ack4_after = read_umac_prph(IWX_WFPM_RSRCS_4PHS_ACK_STTS);
+      const std::string boot_after = bz_boot_regs();
+      nic_unlock();
+      _log("Bz after reset: " + boot_after);
+      _log("Bz after reset: WFPM_CTRL " + hex(wfpm_after) +
+           (wfpm_after & IWX_WFPM_AUX_CTL_AUX_IF_MAC_OWNER_MSK ? " (owner still set)"
+                                                                : " (owner cleared)") +
+           ", 4phs req " + hex(req4_after) + " ack " + hex(ack4_after));
+    }
+  } else {
+    sw_reset();
+    if (_integrated && !gen3()) {
+      setb(IWX_CSR_GP_CNTRL, IWX_CSR_GP_CNTRL_REG_FLAG_INIT_DONE);
+      delay_us(20);
+      if (!poll_bit(IWX_CSR_GP_CNTRL, IWX_CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY,
+                    IWX_CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY, 25000)) {
+        _log("timeout waiting for the clock before power gating");
+        return false;
+      }
+      force_power_gating();
+      setb(IWX_CSR_RESET, IWX_CSR_RESET_REG_FLAG_SW_RESET);
+      delay_us(5000);
+    }
+    if (!apm_init()) return false;
   }
-  if (!apm_init()) return false;
   /* MSI rather than MSI-X causes, so CSR_INT reports them (iwx_conf_msix_hw
    * with sc_msix = 0). */
   if (nic_lock()) {
@@ -684,7 +748,7 @@ bool IwxDevice::load_firmware(std::string &error) {
     }
     scratch = reinterpret_cast<iwx_prph_scratch *>(_prph_scratch.va);
     std::memset(scratch, 0, sizeof(*scratch));
-    dram = &scratch->dram;
+    dram = &scratch->dram.common;
   } else {
     ci = reinterpret_cast<iwx_context_info *>(_ctxt_info.va);
     std::memset(ci, 0, sizeof(*ci));
@@ -791,7 +855,10 @@ bool IwxDevice::load_firmware(std::string &error) {
     /* iwx_ctxt_info_gen3_init */
     auto &ctrl = scratch->ctrl_cfg;
     ctrl.version.version = 0;
-    ctrl.version.mac_id = htole16(static_cast<uint16_t>(rd(IWX_CSR_HW_REV)));
+    uint16_t mac_id = static_cast<uint16_t>(rd(IWX_CSR_HW_REV));
+    if (bz()) /* Linux info.hw_rev: CSR_HW_REV with the CNVi step OR-ed in */
+      mac_id = static_cast<uint16_t>(mac_id | _hw_rev_step);
+    ctrl.version.mac_id = htole16(mac_id);
     ctrl.version.size = htole16(sizeof(*scratch) / 4);
     const uint32_t rb_flag =
         _rx_buf_bytes == 8192 ? (IWX_PRPH_SCRATCH_RB_SIZE_4K | IWX_PRPH_SCRATCH_RB_SIZE_EXT_8K)
@@ -805,7 +872,8 @@ bool IwxDevice::load_firmware(std::string &error) {
     std::memset(g3, 0, sizeof(*g3));
     g3->prph_info_base_addr = htole64(_prph_info.pa);
     g3->prph_scratch_base_addr = htole64(_prph_scratch.pa);
-    g3->prph_scratch_size = htole32(sizeof(*scratch));
+    g3->prph_scratch_size = htole32(static_cast<uint32_t>(
+        offsetof(iwx_prph_scratch, dram.common) + sizeof(iwx_context_info_dram)));
     g3->cr_head_idx_arr_base_addr = htole64(_rx_stat.pa);
     g3->tr_tail_idx_arr_base_addr = htole64(_prph_info.pa + DmaPool::kPageBytes / 2);
     g3->cr_tail_idx_arr_base_addr = htole64(_prph_info.pa + 3 * DmaPool::kPageBytes / 4);
@@ -857,9 +925,41 @@ bool IwxDevice::load_firmware(std::string &error) {
     wr(IWX_CSR_CTXT_INFO_BA + 4, static_cast<uint32_t>(_ctxt_info.pa >> 32));
   }
   set_ltr();
+  if (gen3()) {
+    wr(IWX_CSR_INT_MASK, IWX_CSR_INT_BIT_ALIVE | IWX_CSR_INT_BIT_FH_RX);
+    wr(IWX_CSR_MSIX_HW_INT_MASK_AD,
+       ~(IWX_MSIX_HW_INT_CAUSES_REG_ALIVE | (bz() ? IWX_MSIX_HW_INT_CAUSES_REG_IML_BZ
+                                                  : IWX_MSIX_HW_INT_CAUSES_REG_IML)));
+  }
   if (bz()) {
+    /* Bz's ROM takes the IML after a FUNC_SCRATCH handshake and ROM_START,
+     * and BOOT_CTRL must be set bit by bit: the ROM preloads bits 11/14/15
+     * (0xc800) and a plain write clears them, which the ROM then reports as
+     * SW_ERR_BZ instead of handing over to the image loader. Leave nothing
+     * that would keep its DMA engine stopped from an earlier boot. */
+    clrb(IWX_CSR_RESET, IWX_CSR_RESET_REG_FLAG_STOP_MASTER);
     wr(IWX_CSR_FUNC_SCRATCH, IWX_CSR_FUNC_SCRATCH_INIT_VALUE);
+    /* Make every CPU-written boot buffer visible before the device reads it. */
+    const auto flush = [](const DmaBuf &b) {
+      const auto *p = reinterpret_cast<const char *>(b.va);
+      for (size_t off = 0; off < b.size; off += 64) _mm_clflush(p + off);
+    };
+    flush(_iml_buf);
+    flush(_ctxt_info);
+    flush(_prph_scratch);
+    flush(_prph_info);
+    flush(_rx_free);
+    flush(_rx_stat);
+    for (const auto &sec : _fw_sections) flush(sec);
+    _mm_mfence();
+    /* Hand the MAC to the ROM before it runs. */
+    clrb(IWX_CSR_GP_CNTRL, IWX_CSR_GP_CNTRL_REG_FLAG_BZ_MAC_ACCESS_REQ);
     setb(IWX_CSR_GP_CNTRL, IWX_CSR_GP_CNTRL_REG_FLAG_ROM_START);
+    setb(IWX_CSR_CTXT_INFO_BOOT_CTRL, IWX_CSR_AUTO_FUNC_BOOT_ENA);
+    for (unsigned i = 0; i < 20; i++) {
+      if (rd(IWX_CSR_MSIX_HW_INT_CAUSES_AD) & IWX_MSIX_HW_INT_CAUSES_REG_IML_BZ) break;
+      delay_us(10000);
+    }
   } else {
     if (!nic_lock()) {
       error = "MAC access failed before the firmware kick";
@@ -874,7 +974,7 @@ bool IwxDevice::load_firmware(std::string &error) {
    * On Bz also check CSR_MSIX_HW_INT_CAUSES_AD in case silicon routes causes
    * there without PCI MSI-X (see docs/BE200.md). */
   {
-    const uint64_t end = now_us() + 1000000;
+    const uint64_t end = now_us() + (bz() ? 2000000u : 1000000u);
     bool alive_cause = false;
     while (now_us() < end) {
       const uint32_t cause = rd(IWX_CSR_INT);
@@ -883,7 +983,7 @@ bool IwxDevice::load_firmware(std::string &error) {
         alive_cause = true;
         break;
       }
-      if (cause != 0xffffffffu && (cause & (IWX_CSR_INT_BIT_SW_ERR | IWX_CSR_INT_BIT_HW_ERR))) {
+      if (cause != 0xffffffffu && (cause & ((bz() ? 0u : IWX_CSR_INT_BIT_SW_ERR) | IWX_CSR_INT_BIT_HW_ERR))) {
         wr(IWX_CSR_INT, cause);
         break;
       }
@@ -914,7 +1014,9 @@ bool IwxDevice::load_firmware(std::string &error) {
       return false;
     }
     for (unsigned i = 0; i < IWX_RX_MQ_RING_COUNT; i++) post_rx_buf(i);
-    ring_rx_doorbell(8);
+    /* Leave one empty slot, tell the card in multiples of 8. Bz takes the free
+     * index through HBUS_TARG_WRPTR; FRBDCB_WIDX_TRG is ignored there. */
+    ring_rx_doorbell(bz() ? ((IWX_RX_MQ_RING_COUNT - 1) & ~7u) : 8);
   }
   if (!wait_for([&] { return _alive_seen; }, 1000)) {
     error = "ALIVE interrupt seen but no ALIVE notification arrived";
@@ -928,6 +1030,24 @@ bool IwxDevice::load_firmware(std::string &error) {
   if (gen3() && !load_pnvm()) {
     error = "the firmware did not take its platform NVM (PNVM)";
     return false;
+  }
+  if (bz()) {
+    /* Confirm PNVM kept the firmware alive before host commands resume. */
+    for (unsigned i = 0; i < 50; i++) {
+      const uint32_t msix = rd(IWX_CSR_MSIX_HW_INT_CAUSES_AD);
+      const uint32_t csr = rd(IWX_CSR_INT);
+      const bool bad = (msix != 0xffffffffu &&
+                        (msix & (IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR_BZ | IWX_MSIX_HW_INT_CAUSES_REG_HW_ERR))) ||
+                       (csr != 0xffffffffu && (csr & IWX_CSR_INT_BIT_HW_ERR));
+      if (bad) {
+        _log("Bz idle after PNVM step +" + std::to_string(i * 2) + " ms: MSIX_HW " + hex(msix) +
+             ", CSR_INT " + hex(csr));
+        dump_error_tables();
+        error = "the firmware reported an error after ALIVE";
+        return false;
+      }
+      delay_us(2000);
+    }
   }
   return true;
 }
@@ -1034,10 +1154,15 @@ bool IwxDevice::load_pnvm() {
 /* iwx_run_init_mvm_ucode(readnvm = 1) followed by the parts of iwx_init_hw
  * a monitor needs. */
 bool IwxDevice::run_init_sequence(std::string &error) {
-  _use_mld = bz() && _fw.has_capa(IWX_UCODE_TLV_CAPA_MLD_API_SUPPORT);
+  /* Bz firmware only speaks the MLD command set, whatever capability word it
+   * reports (the AX203's hr firmware is API 97 and carries it; BE200 the
+   * same). */
+  _use_mld = bz();
   if (_use_mld) _log("firmware MLD API enabled (experimental)");
   iwx_init_extended_cfg_cmd init_cfg{};
-  init_cfg.init_flags = htole32(IWX_INIT_NVM);
+  /* MLD firmware marks the PHY configuration (not NVM_ACCESS) before
+   * INIT_COMPLETE, as iwl_mld_run_fw_init_sequence does. */
+  init_cfg.init_flags = htole32(bz() ? IWX_INIT_PHY : IWX_INIT_NVM);
   _init_complete = false;
   /* What the firmware sends while it initialises goes to the log, so a card
    * that never answers INIT_COMPLETE can be told apart (issue #2). */
@@ -1047,11 +1172,24 @@ bool IwxDevice::run_init_sequence(std::string &error) {
     error = "INIT_EXTENDED_CFG failed";
     return false;
   }
-  iwx_nvm_access_complete_cmd nvm_complete{};
-  if (send_cmd(IWX_WIDE_ID(IWX_REGULATORY_AND_NVM_GROUP, IWX_NVM_ACCESS_COMPLETE),
-               &nvm_complete, sizeof(nvm_complete), false, nullptr)) {
-    error = "NVM_ACCESS_COMPLETE failed";
-    return false;
+  if (bz()) {
+    /* MLD firmware takes the PHY configuration before INIT_COMPLETE and has
+     * no NVM_ACCESS_COMPLETE (iwl_mld_run_fw_init_sequence). */
+    iwx_phy_cfg_cmd_v3 phy{};
+    phy.phy_cfg = htole32(_fw.phy_config);
+    phy.calib_control.event_trigger = htole32(_fw.calib_event_trigger);
+    phy.calib_control.flow_trigger = htole32(_fw.calib_flow_trigger);
+    if (send_cmd(IWX_PHY_CONFIGURATION_CMD, &phy, sizeof(phy), false, nullptr)) {
+      error = "PHY_CONFIGURATION failed";
+      return false;
+    }
+  } else {
+    iwx_nvm_access_complete_cmd nvm_complete{};
+    if (send_cmd(IWX_WIDE_ID(IWX_REGULATORY_AND_NVM_GROUP, IWX_NVM_ACCESS_COMPLETE),
+                 &nvm_complete, sizeof(nvm_complete), false, nullptr)) {
+      error = "NVM_ACCESS_COMPLETE failed";
+      return false;
+    }
   }
   const bool init_done = wait_for([&] { return _init_complete; }, 5000);
   _trace_packets = 0;
@@ -1110,7 +1248,7 @@ bool IwxDevice::run_init_sequence(std::string &error) {
     err = send_cmd(iwx_cmd_id(IWX_SOC_CONFIGURATION_CMD, IWX_SYSTEM_GROUP, 0), &soc,
                    sizeof(soc), false, nullptr);
   }
-  if (!err && _fw.has_capa(IWX_UCODE_TLV_CAPA_DQA_SUPPORT)) {
+  if (!err && !bz() && _fw.has_capa(IWX_UCODE_TLV_CAPA_DQA_SUPPORT)) {
     iwx_dqa_enable_cmd dqa{};
     dqa.cmd_queue = htole32(IWX_DQA_CMD_QUEUE);
     err = send_cmd(iwx_cmd_id(IWX_DQA_ENABLE_CMD, IWX_DATA_PATH_GROUP, 0), &dqa, sizeof(dqa),
@@ -1172,10 +1310,17 @@ void IwxDevice::stop() {
       }
       nic_unlock();
     }
-    clrb(IWX_CSR_GP_CNTRL,
-         bz() ? IWX_CSR_GP_CNTRL_REG_FLAG_BZ_MAC_ACCESS_REQ : IWX_CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ);
+    if (bz()) {
+      /* Linux Bz: drop MAC_INIT and the AUX ownership, then reset; the old
+       * STOP_MASTER/INIT_DONE handshake does not exist here. */
+      clrb(IWX_CSR_GP_CNTRL, IWX_CSR_GP_CNTRL_REG_FLAG_BZ_MAC_ACCESS_REQ |
+                                 IWX_CSR_GP_CNTRL_REG_FLAG_MAC_INIT);
+    } else {
+      clrb(IWX_CSR_GP_CNTRL, IWX_CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ);
+      _nic_locks = 0;
+      apm_stop();
+    }
     _nic_locks = 0;
-    apm_stop();
     sw_reset();
     mask_interrupts();
     prepare_card_hw();
@@ -1186,6 +1331,10 @@ void IwxDevice::stop() {
   _sta_link_added = _sta_link_active = false;
   _use_mld = false;
   _ba_station = _agg_queue_enabled = _agg_active = false;
+  _ba_tids = 0;
+  for (auto &p : _bz_peers) p = BzPeer{};
+  _reorder.clear();
+  _deferred_rx.clear();
 }
 
 /* ---------------------------------------------------------------- commands */
@@ -1434,7 +1583,7 @@ bool IwxDevice::answer_country_notice(std::string *got) {
 bool IwxDevice::set_promiscuous(bool on) {
   if (on == _promisc) return true;
   _promisc = on;
-  if (!_mac_added) return true;
+  if (!_mac_added || bz()) return true; /* Bz never runs promiscuous */
   if (!nic_lock()) return false;
   const int err = use_mld() ? mld_mac_cmd(IWX_FW_CTXT_ACTION_MODIFY) : mac_ctxt_cmd(IWX_FW_CTXT_ACTION_MODIFY);
   nic_unlock();
@@ -1442,10 +1591,256 @@ bool IwxDevice::set_promiscuous(bool on) {
   return err == 0;
 }
 
+/* ---- Bz receive Block Ack: one firmware station per AWDL peer ---- */
+
+void IwxDevice::bz_recount_ba_tids() {
+  _ba_tids = 0;
+  for (const auto &p : _bz_peers)
+    if (p.used) _ba_tids |= p.valid;
+}
+
+/* Takes one peer's station down: its sessions, then the entry (Linux removes
+ * the queues before the station). */
+void IwxDevice::bz_peer_drop(unsigned slot) {
+  BzPeer &p = _bz_peers[slot];
+  if (!p.used) return;
+  const unsigned sta = IWX_BZ_PEER_STA_ID + slot;
+  for (unsigned t = 0; t < 8; t++)
+    if ((p.valid >> t) & 1) {
+      /* The session's buffered frames go up before the firmware can reuse
+       * the BAID for someone else. */
+      if (!bz_baid_remove(p.baid[t], t, sta)) _reorder.close(p.baid[t]);
+    }
+  iwx_remove_sta_cmd rm{};
+  rm.sta_id = htole32(sta);
+  send_cmd(IWX_WIDE_ID(IWX_MAC_CONF_GROUP, IWX_STA_REMOVE_CMD), &rm, sizeof(rm), false, nullptr);
+  p = BzPeer{};
+  bz_recount_ba_tids();
+}
+
+/* Slot of `peer` in _bz_peers, adding its station (evicting the least
+ * recently used peer if all are taken); -1 on failure. nic_lock() held. */
+int IwxDevice::bz_peer_station(const uint8_t peer[6]) {
+  int slot = -1, free_slot = -1, oldest = 0;
+  for (unsigned i = 0; i < kBzPeers; i++) {
+    const BzPeer &p = _bz_peers[i];
+    if (p.used && std::memcmp(p.addr, peer, 6) == 0) slot = static_cast<int>(i);
+    else if (!p.used && free_slot < 0) free_slot = static_cast<int>(i);
+    if (p.used && _bz_peers[oldest].used && p.last_us < _bz_peers[oldest].last_us)
+      oldest = static_cast<int>(i);
+  }
+  if (slot < 0) {
+    if (free_slot < 0) {
+      const uint8_t *a = _bz_peers[oldest].addr;
+      char b[120];
+      plat_snprintf(b, sizeof(b),
+                    "Block Ack: all %u peer stations taken, dropping %02x:%02x:%02x:%02x:%02x:%02x "
+                    "(station %u)",
+                    kBzPeers, a[0], a[1], a[2], a[3], a[4], a[5], IWX_BZ_PEER_STA_ID + oldest);
+      _log(b);
+      bz_peer_drop(static_cast<unsigned>(oldest));
+      free_slot = oldest;
+    }
+    const unsigned sta = IWX_BZ_PEER_STA_ID + static_cast<unsigned>(free_slot);
+    iwx_sta_cfg_cmd_v2 cmd{};
+    cmd.sta_id = htole32(sta);
+    cmd.link_id = htole32(0);
+    std::memcpy(cmd.peer_mld_address, peer, 6);
+    std::memcpy(cmd.peer_link_address, peer, 6);
+    cmd.station_type = htole32(IWX_STATION_TYPE_PEER);
+    const uint8_t ver = cmd_version(IWX_MAC_CONF_GROUP, IWX_STA_CONFIG_CMD);
+    const size_t sz = (ver != IWX_FW_CMD_VER_UNKNOWN && ver > 1) ? sizeof(iwx_sta_cfg_cmd_v2)
+                                                                 : sizeof(iwx_sta_cfg_cmd_v1);
+    const int err = send_cmd(IWX_WIDE_ID(IWX_MAC_CONF_GROUP, IWX_STA_CONFIG_CMD), &cmd, sz,
+                             false, nullptr);
+    if (err) {
+      _log("Block Ack: peer station " + std::to_string(sta) + " refused (" +
+           std::to_string(err) + ")");
+      return -1;
+    }
+    slot = free_slot;
+    BzPeer &p = _bz_peers[slot];
+    p = BzPeer{};
+    p.used = true;
+    std::memcpy(p.addr, peer, 6);
+  }
+  _bz_peers[slot].last_us = now_us();
+  return slot;
+}
+
+/* RX_BAID_ALLOCATION_CONFIG_CMD: the firmware reorders for this station+TID
+ * and answers with the BAID; no ADD_STA modify is involved. */
+int IwxDevice::bz_baid_add(unsigned sta_id, unsigned tid, uint16_t ssn, uint16_t window,
+                           uint32_t &baid) {
+  iwx_rx_baid_cfg_cmd cmd{};
+  cmd.action = htole32(IWX_RX_BAID_ACTION_ADD);
+  cmd.alloc.sta_id_mask = htole32(1u << sta_id);
+  cmd.alloc.tid = static_cast<uint8_t>(tid);
+  cmd.alloc.ssn = htole16(ssn);
+  cmd.alloc.win_size = htole16(window);
+  std::vector<uint8_t> resp;
+  const int err = send_cmd(IWX_WIDE_ID(IWX_DATA_PATH_GROUP, IWX_RX_BAID_ALLOCATION_CONFIG_CMD),
+                           &cmd, sizeof(cmd), true, &resp);
+  if (err) return err;
+  const auto *pkt = reinterpret_cast<const iwx_rx_packet *>(resp.data());
+  if ((pkt->hdr.group_id & IWX_CMD_FAILED_MSK) ||
+      iwx_rx_packet_payload_len(pkt) != sizeof(uint32_t))
+    return EIO;
+  uint32_t value = 0;
+  std::memcpy(&value, pkt->data, sizeof(value));
+  baid = le32toh(value);
+  return 0;
+}
+
+int IwxDevice::bz_baid_remove(uint32_t baid, unsigned tid, unsigned sta_id) {
+  iwx_rx_baid_cfg_cmd cmd{};
+  cmd.action = htole32(IWX_RX_BAID_ACTION_REMOVE);
+  /* iwl_mvm_fw_baid_op_cmd: only version 1 (or an unlisted command) removes
+   * by BAID; version 2+ names station mask and TID. A BAID read as a station
+   * mask asserts the firmware (ADVANCED_SYSASSERT 0x2010351e). */
+  const uint8_t ver = cmd_version(IWX_DATA_PATH_GROUP, IWX_RX_BAID_ALLOCATION_CONFIG_CMD);
+  if (ver >= 2 && ver != IWX_FW_CMD_VER_UNKNOWN) {
+    cmd.remove.sta_id_mask = htole32(1u << sta_id);
+    cmd.remove.tid = htole32(tid);
+  } else {
+    cmd.remove_v1.baid = htole32(baid);
+  }
+  std::vector<uint8_t> resp;
+  int err = send_cmd(IWX_WIDE_ID(IWX_DATA_PATH_GROUP, IWX_RX_BAID_ALLOCATION_CONFIG_CMD), &cmd,
+                     sizeof(cmd), true, &resp);
+  bool failed = false;
+  if (!err && resp.size() >= sizeof(iwx_rx_packet)) {
+    const auto *pkt = reinterpret_cast<const iwx_rx_packet *>(resp.data());
+    failed = (pkt->hdr.group_id & IWX_CMD_FAILED_MSK) != 0;
+    if (failed) err = EIO;
+  }
+  if (_ba_rm_logged < 40) {
+    _ba_rm_logged++;
+    _log("Block Ack: remove BAID " + std::to_string(baid) + " tid " + std::to_string(tid) +
+         " station " + std::to_string(sta_id) +
+         (err ? (failed ? ": firmware refused" : ": error " + std::to_string(err)) : ": ok"));
+  }
+  return err;
+}
+
+/* SESSION_PROTECTION_CMD: an unassociated BSS_STA link gets no air time of
+ * its own (Linux schedules this before authenticating). Version 2+ names the
+ * link, version 1 the MAC (iwl_mvm_get_session_prot_id). */
+int IwxDevice::bz_session_protect(unsigned link_id, unsigned mac_id, uint32_t duration_tu) {
+  iwx_session_prot_cmd sp{};
+  const uint8_t ver = cmd_version(IWX_MAC_CONF_GROUP, IWX_SESSION_PROTECTION_CMD);
+  const bool by_link = ver >= 2 && ver != IWX_FW_CMD_VER_UNKNOWN;
+  sp.id_and_color = htole32(by_link ? link_id : mac_id);
+  sp.action = htole32(IWX_FW_CTXT_ACTION_ADD);
+  sp.conf_id = htole32(IWX_SESSION_PROTECT_CONF_ASSOC);
+  sp.duration_tu = htole32(duration_tu);
+  return send_cmd(IWX_WIDE_ID(IWX_MAC_CONF_GROUP, IWX_SESSION_PROTECTION_CMD), &sp, sizeof(sp),
+                  false, nullptr);
+}
+
+bool IwxDevice::keep_on_channel() {
+  if (!bz() || _fw_error) return true;
+  const uint64_t now = now_us();
+  if (_sta_mac_added && _sta_join_us == 0) _sta_join_us = now;
+  /* The station beside the listener: until association, at most 10 s per
+   * join so a silent AP cannot starve AWDL. A new ADD only once the last one
+   * ended (1000 TU is 1.024 s), never on top of a running one, and none once
+   * associated (as Linux): overlapping ADDs on the associated link while AWDL
+   * kept the other PHY busy asserted the LMAC (0x3706, 2026-11-25). */
+  const bool sta_session_due =
+      !_sta_session_on ? now - _sta_session_sent_us >= 200000 : now - _sta_session_sent_us >= 1100000;
+  if (_sta_mac_added && !_sta_assoc && now - _sta_join_us < 10000000 && sta_session_due) {
+    _sta_session_sent_us = now;
+    _sta_session_on = true; /* until the firmware says it ended or was not scheduled */
+    if (nic_lock()) {
+      const int err = bz_session_protect(1, 1, 1000);
+      nic_unlock();
+      if (err && _session_logged++ < 12)
+        _log("station: session protection refused (" + std::to_string(err) + ")");
+    }
+  }
+  if (!_mac_added || _opt.mac_type != MacType::Sta) return true;
+  if (_session_on && now - _session_sent_us < 700000) return true;
+  if (now - _session_sent_us < 200000) return true;
+  _session_sent_us = now;
+  if (!nic_lock()) return false;
+  const int err = bz_session_protect(0, 0, 1000);
+  nic_unlock();
+  if (err && _session_logged++ < 12)
+    _log("session protection refused (" + std::to_string(err) + ")");
+  return err == 0;
+}
+
+std::string IwxDevice::bz_boot_regs() {
+  return "CSR_INT " + hex(rd(IWX_CSR_INT)) + ", FH_INT " + hex(rd(IWX_CSR_FH_INT_STATUS)) +
+         ", MSIX_HW " + hex(rd(IWX_CSR_MSIX_HW_INT_CAUSES_AD)) + ", FSEQ ERROR_CODE " +
+         hex(read_prph(0xa340c8)) + ", ALIVE_TOKEN " + hex(read_prph(0xa340f0)) + ", SB_CPU_2 " +
+         hex(read_umac_prph(IWX_UMAG_SB_CPU_2_STATUS)) + ", SB_CPU_1 " +
+         hex(read_umac_prph(IWX_UMAG_SB_CPU_1_STATUS)) + ", AUTH_KEY_0 " +
+         hex(read_umac_prph(0xa03088)) + ", func scratch " + hex(rd(IWX_CSR_FUNC_SCRATCH));
+}
+
 bool IwxDevice::add_rx_ba(const uint8_t peer[6], unsigned tid, uint16_t ssn, uint16_t window,
                           uint8_t token) {
-  if (use_mld()) return false;
   if (tid >= 8 || !_mac_added) return false;
+  if (bz()) {
+    if (!nic_lock()) return false;
+    int known = -1;
+    for (unsigned i = 0; i < kBzPeers; i++)
+      if (_bz_peers[i].used && std::memcmp(_bz_peers[i].addr, peer, 6) == 0)
+        known = static_cast<int>(i);
+    const int slot = bz_peer_station(peer);
+    if (slot < 0) {
+      nic_unlock();
+      return false;
+    }
+    BzPeer &p = _bz_peers[slot];
+    const unsigned sta = IWX_BZ_PEER_STA_ID + slot;
+    const bool open = (p.valid >> tid) & 1;
+    if (_ba_logged < 40) {
+      _ba_logged++;
+      char b[220];
+      plat_snprintf(b, sizeof(b),
+                    "Block Ack: ADDBA from %02x:%02x:%02x:%02x:%02x:%02x tid %u token %u ssn %u "
+                    "window %u; station %u (%s), its open tids 0x%02x, this tid %s (BAID %u, token %u)",
+                    peer[0], peer[1], peer[2], peer[3], peer[4], peer[5], tid, token, ssn, window, sta,
+                    known < 0 ? "new" : "kept", p.valid, open ? "open" : "closed", p.baid[tid],
+                    p.token[tid]);
+      _log(b);
+    }
+    int err = 0;
+    /* A new token is a new session with its own start sequence. */
+    if (open && p.token[tid] != token) {
+      bz_baid_remove(p.baid[tid], tid, sta);
+      _reorder.close(p.baid[tid]);
+      p.valid &= static_cast<uint8_t>(~(1u << tid));
+    }
+    if (!((p.valid >> tid) & 1)) {
+      uint32_t baid = 0;
+      err = bz_baid_add(sta, tid, ssn, window, baid);
+      if (!err && baid >= RxReorder::kMaxBaid) {
+        _log("Block Ack: BAID " + std::to_string(baid) + " out of range, declining (station " +
+             std::to_string(sta) + ", tid " + std::to_string(tid) + ")");
+        bz_baid_remove(baid, tid, sta);
+        err = EIO;
+      }
+      if (!err) {
+        p.baid[tid] = baid;
+        p.valid |= static_cast<uint8_t>(1u << tid);
+        p.token[tid] = token;
+        _reorder.open(baid, ssn, window);
+        _log("Block Ack: Bz receive session open (BAID " + std::to_string(baid) + "), station " +
+             std::to_string(sta) + ", tid " + std::to_string(tid) + ", window " +
+             std::to_string(window));
+      } else {
+        _log("Block Ack: BAID add refused (" + std::to_string(err) + "), station " +
+             std::to_string(sta) + ", tid " + std::to_string(tid));
+      }
+    }
+    bz_recount_ba_tids();
+    nic_unlock();
+    return err == 0;
+  }
   if (!nic_lock()) return false;
   constexpr uint8_t kBaStation = 3; /* ForbiddenItlwm's kAwdlBaStationId */
   int err = 0;
@@ -1729,8 +2124,30 @@ void IwxDevice::handle_ba_notif(const uint8_t *payload, size_t len) {
   }
 }
 
-bool IwxDevice::remove_rx_ba(unsigned tid) {
-  if (use_mld()) return true;
+bool IwxDevice::remove_rx_ba(unsigned tid, const uint8_t *peer) {
+  if (bz()) {
+    if (tid >= 8 || !((_ba_tids >> tid) & 1)) return true;
+    if (!nic_lock()) return false;
+    bool ok = true;
+    uint32_t closed[8];
+    unsigned nclosed = 0;
+    for (unsigned i = 0; i < kBzPeers; i++) {
+      BzPeer &p = _bz_peers[i];
+      if (!p.used || !((p.valid >> tid) & 1)) continue;
+      if (peer && std::memcmp(p.addr, peer, 6) != 0) continue;
+      if (bz_baid_remove(p.baid[tid], tid, IWX_BZ_PEER_STA_ID + i)) {
+        ok = false;
+      } else {
+        p.valid &= static_cast<uint8_t>(~(1u << tid));
+        closed[nclosed++] = p.baid[tid];
+      }
+    }
+    bz_recount_ba_tids();
+    nic_unlock();
+    /* Held frames out before the BAID can be handed to another session. */
+    for (unsigned i = 0; i < nclosed; i++) _reorder.close(closed[i]);
+    return ok;
+  }
   if (tid >= 8 || !((_ba_tids >> tid) & 1)) return true;
   if (!nic_lock()) return false;
   iwx_add_sta_cmd cmd{};
@@ -1936,7 +2353,12 @@ int IwxDevice::add_monitor_sta() {
 }
 
 /* The firmware picks the queue number (TVQM); iwx_tvqm_enable_txq. */
-int IwxDevice::enable_monitor_queue() { return enable_queue(_dataq, IWX_MONITOR_STA_ID, IWX_MGMT_TID); }
+/* Linux's MLD monitor station queues on IWL_MAX_TID_COUNT (8), not the legacy
+ * MGMT TID 15. */
+int IwxDevice::enable_monitor_queue() {
+  return enable_queue(_dataq, IWX_MONITOR_STA_ID,
+                      static_cast<uint8_t>(bz() ? IWX_MAX_TID_COUNT : IWX_MGMT_TID));
+}
 
 int IwxDevice::enable_queue(TxRing &ring, uint8_t sta_id, uint8_t tid) {
   std::vector<uint8_t> resp;
@@ -1995,13 +2417,23 @@ int IwxDevice::mld_mac_cmd(uint32_t action, const uint8_t *address) {
   cmd.id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(0, 0));
   cmd.action = htole32(action);
   if (action != IWX_FW_CTXT_ACTION_REMOVE) {
-    cmd.mac_type = htole32(IWX_FW_MAC_TYPE_LISTENER);
+    /* MLD firmware has no IBSS (Linux mld dropped it): --mac-type ibss stays a
+     * listener; sta gives the BSS_STA context Linux sends unassociated
+     * authentication frames from. */
+    if (action == IWX_FW_CTXT_ACTION_ADD && _opt.mac_type != MacType::Listener)
+      _log(_opt.mac_type == MacType::Sta ? "Bz listener MAC as BSS_STA (--mac-type sta)"
+                                         : "Bz: --mac-type ibss is not supported, using listener");
+    cmd.mac_type = htole32(_opt.mac_type == MacType::Sta ? IWX_FW_MAC_TYPE_BSS_STA
+                                                         : IWX_FW_MAC_TYPE_LISTENER);
     std::memcpy(cmd.local_mld_addr, address ? address : _address.data(), 6);
-    cmd.filter_flags = htole32((_promisc ? IWX_MAC_CFG_FILTER_PROMISC : 0u) |
-                               IWX_MAC_CFG_FILTER_ACCEPT_CONTROL_AND_MGMT |
+    /* No PROMISC on Bz: with it the firmware hands every ACK to the host and
+     * neither matches them to its own unicast nor acknowledges frames for us
+     * (every unicast ends in LONG_LIMIT). CONTROL_AND_MGMT is what lets the
+     * AWDL action frames (foreign BSSID) through. */
+    cmd.filter_flags = htole32(IWX_MAC_CFG_FILTER_ACCEPT_CONTROL_AND_MGMT |
                                IWX_MAC_CFG_FILTER_ACCEPT_GRP |
-                               IWX_MAC_CFG_FILTER_ACCEPT_BEACON |
-                               IWX_MAC_CFG_FILTER_ACCEPT_PROBE_REQ);
+                               IWX_MAC_CFG_FILTER_ACCEPT_BEACON);
+    cmd.he_support = htole16(1);
   }
   return send_cmd(IWX_WIDE_ID(IWX_MAC_CONF_GROUP, IWX_MAC_CONFIG_CMD), &cmd, sizeof(cmd), false, nullptr);
 }
@@ -2018,6 +2450,22 @@ int IwxDevice::mld_link_add() {
 }
 
 int IwxDevice::mld_link_modify(bool active, uint32_t modify_mask, const uint8_t *address) {
+  /* EDCA defaults for a link (802.11-2016 table 9-137), firmware AC order.
+   * The listener needs them as much as a station link: with a Wi-Fi station
+   * time-sharing the radio, an AWDL link without EDCA/QoS parameters loses
+   * its transmit opportunities (Concurrent mode). */
+  struct Edca {
+    uint16_t cw_min, cw_max;
+    uint8_t aifsn;
+    uint16_t txop_32us;
+    uint8_t fifo;
+  };
+  static constexpr Edca kEdca[IWX_AC_NUM] = {
+      {15, 1023, 7, 0, IWX_GEN2_EDCA_TX_FIFO_BK},
+      {15, 1023, 3, 0, IWX_GEN2_EDCA_TX_FIFO_BE},
+      {7, 15, 2, 94, IWX_GEN2_EDCA_TX_FIFO_VI},
+      {3, 7, 2, 47, IWX_GEN2_EDCA_TX_FIFO_VO},
+  };
   iwx_link_config_cmd cmd{};
   cmd.action = htole32(IWX_FW_CTXT_ACTION_MODIFY);
   cmd.link_id = htole32(0);
@@ -2029,6 +2477,18 @@ int IwxDevice::mld_link_modify(bool active, uint32_t modify_mask, const uint8_t 
   cmd.cck_rates = htole32(_channel <= 14 ? 0x0fu : 0u);
   cmd.ofdm_rates = htole32(0x15u); /* 6, 12, 24 */
   cmd.short_slot = htole32(_channel > 14 ? 1u : 0u);
+  for (unsigned ac = 0; ac < IWX_AC_NUM; ac++) {
+    cmd.ac[ac].cw_min = htole16(kEdca[ac].cw_min);
+    cmd.ac[ac].cw_max = htole16(kEdca[ac].cw_max);
+    cmd.ac[ac].aifsn = kEdca[ac].aifsn;
+    cmd.ac[ac].fifos_mask = static_cast<uint8_t>(1u << kEdca[ac].fifo);
+    cmd.ac[ac].edca_txop = htole16(static_cast<uint16_t>(kEdca[ac].txop_32us * 32));
+  }
+  cmd.qos_flags = htole32(IWX_MAC_QOS_FLG_UPDATE_EDCA |
+                          (_width > 20 && _channel > 14 ? IWX_MAC_QOS_FLG_TGN : 0u));
+  cmd.bi = htole32(100);
+  cmd.dtim_interval = htole32(100);
+  cmd.spec_link_id = 0;
   return send_cmd(IWX_WIDE_ID(IWX_MAC_CONF_GROUP, IWX_LINK_CONFIG_CMD), &cmd, sizeof(cmd), false, nullptr);
 }
 
@@ -2079,13 +2539,9 @@ bool IwxDevice::start_monitor(uint8_t channel, unsigned width_mhz, const uint8_t
   if (!nic_lock()) return false;
   auto bz_step_check = [&](const char *step) -> bool {
     if (!bz()) return true;
-    const uint32_t c = rd(IWX_CSR_INT);
-    const uint32_t hw = rd(IWX_CSR_MSIX_HW_INT_CAUSES_AD);
-    const bool bad = (c != 0xffffffffu && (c & (IWX_CSR_INT_BIT_SW_ERR | IWX_CSR_INT_BIT_HW_ERR))) ||
-                     (hw != 0xffffffffu && (hw & (IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR_BZ | IWX_MSIX_HW_INT_CAUSES_REG_HW_ERR)));
-    if (!bad) return true;
-    _log(std::string("Bz error latched after ") + step + ": CSR_INT " + hex(c) + ", MSIX_HW_CAUSES " +
-         hex(hw) + ", MSIX_FH_CAUSES " + hex(rd(IWX_CSR_MSIX_FH_INT_CAUSES_AD)));
+    std::string what;
+    if (!fw_error_state(what)) return true;
+    _log(std::string("Bz error latched after ") + step + ": " + what);
     return false;
   };
   if (!bz_step_check("init")) {
@@ -2233,7 +2689,21 @@ bool IwxDevice::set_channel(uint8_t channel, unsigned width_mhz) {
     return false;
   }
   if (!nic_lock()) return false;
-  const int err = phy_ctxt_cmd(IWX_FW_CTXT_ACTION_MODIFY);
+  int err;
+  if (bz()) {
+    /* MLD: the link holds the PHY, so a PHY modify under a live link fails
+     * (138) and then takes the firmware down. Let the link go, move the PHY,
+     * bind and activate again (Linux iwl_mld_change_chanctx). */
+    err = mld_link_modify(false, IWX_LINK_CONTEXT_MODIFY_ACTIVE);
+    if (!err) err = phy_ctxt_cmd(IWX_FW_CTXT_ACTION_MODIFY);
+    if (!err) err = mld_link_modify(false, IWX_LINK_CONTEXT_MODIFY_RATES_INFO);
+    if (!err) {
+      err = mld_link_modify(true, IWX_LINK_CONTEXT_MODIFY_ACTIVE | IWX_LINK_CONTEXT_MODIFY_RATES_INFO);
+      if (!err) _link_active = true;
+    }
+  } else {
+    err = phy_ctxt_cmd(IWX_FW_CTXT_ACTION_MODIFY);
+  }
   nic_unlock();
   if (err) {
     _log("channel change failed (" + std::to_string(err) + ")");
@@ -2428,15 +2898,26 @@ void IwxDevice::deliver_deferred() {
     DeferredRx d = std::move(_deferred_rx.front());
     _deferred_rx.pop_front();
     d.meta.data = d.frame.data();
-    if (_on_rx) _on_rx(d.meta);
+    d.meta.len = d.frame.size();
+    if (d.raw) rx_in(d.meta, d.reorder_data, d.amsdu, d.last_subframe);
+    else if (_on_rx) _on_rx(d.meta);
   }
 }
 
 int IwxDevice::poll() {
   if (!_rx_stat) return 0;
-  if (_cmd_depth == 0) deliver_deferred();
-  const auto *stat = reinterpret_cast<volatile iwx_rb_status *>(_rx_stat.va);
+  if (_cmd_depth == 0) {
+    deliver_deferred();
+    _reorder.expire(now_us());
+  }
+  /* Bz publishes a 16-bit producer index in the status word and 4-byte
+   * completions carrying the buffer's rbid; the older families use
+   * iwx_rb_status and the slot holds the buffer. */
   const auto closed = [&] {
+    if (bz())
+      return static_cast<unsigned>(le16toh(*reinterpret_cast<volatile uint16_t *>(_rx_stat.va))) &
+             (IWX_RX_MQ_RING_COUNT - 1);
+    const auto *stat = reinterpret_cast<volatile iwx_rb_status *>(_rx_stat.va);
     return static_cast<unsigned>(le16toh(stat->closed_rb_num) & 0xfff) & (IWX_RX_MQ_RING_COUNT - 1);
   };
   int handled = 0;
@@ -2449,14 +2930,32 @@ int IwxDevice::poll() {
    *  - buffers still being handled further up the stack are not given back:
    *    the card is told only about those before the oldest one in use. */
   for (unsigned hw = closed(); _rx_cur != hw && handled < int(IWX_RX_MQ_RING_COUNT); hw = closed()) {
-    const unsigned idx = _rx_cur;
+    const unsigned pos = _rx_cur;
+    unsigned idx = pos;
+    if (bz()) {
+      const auto *cq = reinterpret_cast<const iwx_rx_completion_desc_bz *>(_rx_used.va);
+      const iwx_rx_completion_desc_bz c = cq[pos];
+      const unsigned rbid = le16toh(c.rbid);
+      if (c.reserved[0] || rbid == 0 || rbid > IWX_RX_MQ_RING_COUNT) {
+        _log("bad Bz receive completion in slot " + std::to_string(pos) + " (rbid " +
+             std::to_string(rbid) + ", flags " + std::to_string(c.flags) + ")");
+        _fw_error = true;
+        break;
+      }
+      idx = rbid - 1;
+    }
     _rx_cur = (_rx_cur + 1) % IWX_RX_MQ_RING_COUNT;
-    _rx_inflight.push_back(idx);
+    _rx_inflight.push_back(pos);
     handle_rb(idx);
     _rx_inflight.pop_back();
     handled++;
   }
   if (handled) {
+    if (bz()) {
+      /* iwl_pcie_irq_handler acks the FH status along with CSR_INT. */
+      const uint32_t fh = rd(IWX_CSR_FH_INT_STATUS);
+      if (fh && fh != 0xffffffffu) wr(IWX_CSR_FH_INT_STATUS, fh);
+    }
     /* The card wants the free index in multiples of 8 (iwx_notif_intr). */
     const unsigned frontier = _rx_inflight.empty() ? _rx_cur : _rx_inflight.front();
     const unsigned w = frontier == 0 ? IWX_RX_MQ_RING_COUNT - 1 : frontier - 1u;
@@ -2494,7 +2993,7 @@ void IwxDevice::post_rx_buf(unsigned index) {
   if (gen3()) {
     auto *bd = reinterpret_cast<iwx_rx_transfer_desc *>(_rx_free.va) + index;
     bd->addr = htole64(_rx_bufs[index].pa);
-    bd->rbid = htole16(static_cast<uint16_t>(index & 0x0fff));
+    bd->rbid = htole16(static_cast<uint16_t>((bz() ? index + 1 : index) & 0x0fff));
   } else {
     reinterpret_cast<uint64_t *>(_rx_free.va)[index] = htole64(_rx_bufs[index].pa | (index & 0x0fff));
   }
@@ -2526,6 +3025,22 @@ void IwxDevice::handle_packet(const uint8_t *raw, size_t len) {
   switch (code) {
   case IWX_REPLY_RX_MPDU_CMD:
     handle_mpdu(payload, plen, (le32toh(pkt->len_n_flags) & IWX_FH_RSCSR_RADA_EN) != 0);
+    break;
+  /* Block Ack reordering: the firmware lets out frames up to an NSSN after a
+   * timeout of its own or a BAR (iwl_mvm_rx_frame_release). */
+  case IWX_FRAME_RELEASE:
+    if (plen >= sizeof(iwx_frame_release)) {
+      const auto *r = reinterpret_cast<const iwx_frame_release *>(payload);
+      _reorder.release(r->baid, static_cast<uint16_t>(le16toh(r->nssn) & 0xfff));
+    }
+    break;
+  case IWX_BAR_FRAME_RELEASE:
+    if (plen >= sizeof(iwx_bar_frame_release)) {
+      const auto *r = reinterpret_cast<const iwx_bar_frame_release *>(payload);
+      const uint32_t info = le32toh(r->ba_info);
+      _reorder.release((info & IWX_BAR_FRAME_RELEASE_BAID_MASK) >> 24,
+                       static_cast<uint16_t>(info & IWX_BAR_FRAME_RELEASE_NSSN_MASK));
+    }
     break;
   case IWX_TX_CMD:
     handle_tx_resp(payload, plen, static_cast<unsigned>(idx));
@@ -2571,6 +3086,18 @@ void IwxDevice::handle_packet(const uint8_t *raw, size_t len) {
       _notice_mcc = le16toh(n->mcc);
       _notice_source = n->source_id;
       _notice_pending = true; /* answered from the main loop: no commands from here */
+    }
+    break;
+  case IWX_WIDE_ID(IWX_MAC_CONF_GROUP, IWX_SESSION_PROTECTION_NOTIF):
+    if (plen >= sizeof(iwx_session_prot_notif)) {
+      const auto *n = reinterpret_cast<const iwx_session_prot_notif *>(payload);
+      const bool start = le32toh(n->start) != 0, ok = le32toh(n->status) == 1;
+      const uint32_t id = le32toh(n->mac_id);
+      if (id == 0) _session_on = start && ok;
+      else if (id == 1) _sta_session_on = start && ok;
+      if (_session_logged++ < 12)
+        _log(std::string("session protection ") + (start ? "started" : "ended") +
+             (ok ? "" : " (not scheduled)") + " for id " + std::to_string(id));
     }
     break;
   case IWX_BA_NOTIF:
@@ -2632,6 +3159,8 @@ void IwxDevice::handle_mpdu(const uint8_t *payload, size_t len, bool rada) {
     frame = unpadded.data();
     mpdu_len -= 2;
   }
+  /* A trailing FCS some firmware appends is removed once, in radio_main
+   * (awdl::strip_valid_fcs checks it against the frame's CRC). */
   /* Energy is reported as a positive number of dB below zero; 0 = none. */
   const uint8_t raw_a = gen3() ? desc->v3.energy_a : desc->v1.energy_a;
   const uint8_t raw_b = gen3() ? desc->v3.energy_b : desc->v1.energy_b;
@@ -2642,8 +3171,26 @@ void IwxDevice::handle_mpdu(const uint8_t *payload, size_t len, bool rada) {
   const uint32_t rnf = le32toh(gen3() ? desc->v3.rate_n_flags : desc->v1.rate_n_flags);
   RxFrame f{frame, mpdu_len, static_cast<int8_t>(energy < -127 ? -127 : energy), channel, rnf,
             le16toh(desc->status), rada};
+  const uint32_t reorder_data = le32toh(desc->reorder_data);
+  const bool amsdu = (desc->mac_flags2 & IWX_RX_MPDU_MFLG2_AMSDU) != 0;
+  const bool last = (desc->amsdu_info & IWX_RX_MPDU_AMSDU_LAST_SUBFRAME) != 0;
   if (_cmd_depth) {
-    if (_deferred_rx.size() < 1024) _deferred_rx.push_back({std::vector<uint8_t>(frame, frame + mpdu_len), f});
+    if (_deferred_rx.size() < 1024)
+      _deferred_rx.push_back(
+          {std::vector<uint8_t>(frame, frame + mpdu_len), f, true, reorder_data, amsdu, last});
+    return;
+  }
+  rx_in(f, reorder_data, amsdu, last);
+}
+
+void IwxDevice::rx_in(const RxFrame &f, uint32_t reorder_data, bool amsdu, bool last_subframe) {
+  if (!_reorder.frame(f, reorder_data, amsdu, last_subframe, now_us())) emit_rx(f);
+}
+
+void IwxDevice::emit_rx(const RxFrame &f) {
+  if (_cmd_depth) {
+    if (_deferred_rx.size() < 1024)
+      _deferred_rx.push_back({std::vector<uint8_t>(f.data, f.data + f.len), f});
     return;
   }
   if (_on_rx) _on_rx(f);
@@ -2776,22 +3323,60 @@ const char *error_name(uint32_t id) {
 }
 } // namespace
 
-void IwxDevice::check_health() {
-  if (!_open || _fw_error) return;
+/* 0: healthy, 1: firmware/DMA error, 2: the card stopped answering. On Bz the
+ * firmware reports its own errors in the MSI-X hardware causes (Linux
+ * iwl_pcie_irq_msix_handler: SW_ERR_BZ, TOP_FATAL_ERR, HW_ERR); the old SW_ERR
+ * position (CSR_INT bit 25) rises by itself while the firmware keeps answering
+ * and leaves no error record, so it is only noted and cleared. */
+int IwxDevice::fw_error_state(std::string &what) {
   const uint32_t cause = rd(IWX_CSR_INT);
   if (cause == 0xffffffffu) {
-    _log("the card stopped answering (CSR_INT reads all ones)");
+    what = "CSR_INT reads all ones";
+    return 2;
+  }
+  if (!bz()) {
+    if (!(cause & (IWX_CSR_INT_BIT_SW_ERR | IWX_CSR_INT_BIT_HW_ERR))) return 0;
+    what = "CSR_INT " + hex(cause) + ", FH_INT " + hex(rd(IWX_CSR_FH_INT_STATUS));
+    return 1;
+  }
+  const uint32_t msix = rd(IWX_CSR_MSIX_HW_INT_CAUSES_AD);
+  if (msix == 0xffffffffu) {
+    what = "MSIX_HW causes read all ones";
+    return 2;
+  }
+  if (cause & IWX_CSR_INT_BIT_SW_ERR) {
+    if (!_bz_bit25_logged) {
+      _log("Bz: CSR_INT bit 25 set (" + hex(cause) + ", FH_INT " +
+           hex(rd(IWX_CSR_FH_INT_STATUS)) + ", MSIX_HW " + hex(msix) +
+           "); not an error on Bz, clearing it");
+      _bz_bit25_logged = true;
+    }
+    wr(IWX_CSR_INT, IWX_CSR_INT_BIT_SW_ERR);
+  }
+  constexpr uint32_t kTopFatal = 1u << 3; /* MSIX_HW_INT_CAUSES_REG_TOP_FATAL_ERR */
+  const uint32_t bad = IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR_BZ | IWX_MSIX_HW_INT_CAUSES_REG_HW_ERR | kTopFatal;
+  if (!(msix & bad) && !(cause & IWX_CSR_INT_BIT_HW_ERR)) return 0;
+  what = "MSIX_HW " + hex(msix) + " (" +
+         (msix & IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR_BZ ? "SW_ERR_BZ "
+          : msix & kTopFatal                           ? "TOP_FATAL "
+                                                       : "HW_ERR ") +
+         "), CSR_INT " + hex(cause) + ", FH_INT " + hex(rd(IWX_CSR_FH_INT_STATUS));
+  return 1;
+}
+
+void IwxDevice::check_health() {
+  if (!_open || _fw_error) return;
+  std::string what;
+  const int st = fw_error_state(what);
+  if (st == 0) return;
+  if (st == 2) {
+    _log("the card stopped answering (" + what + ")");
     _fw_error = true;
     return;
   }
-  const uint32_t hw_cause = bz() ? rd(IWX_CSR_MSIX_HW_INT_CAUSES_AD) : 0u;
-  const bool csr_err = (cause & (IWX_CSR_INT_BIT_SW_ERR | IWX_CSR_INT_BIT_HW_ERR)) != 0;
-  const bool msix_err = bz() && hw_cause != 0xffffffffu &&
-                        (hw_cause & (IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR_BZ | IWX_MSIX_HW_INT_CAUSES_REG_HW_ERR)) != 0;
-  if (!csr_err && !msix_err) return;
-  _log("firmware/DMA error: CSR_INT " + hex(cause) +
-       (bz() ? ", MSIX_HW_CAUSES " + hex(hw_cause) + ", MSIX_FH_CAUSES " +
-                   hex(rd(IWX_CSR_MSIX_FH_INT_CAUSES_AD)) + ", GP_CNTRL " + hex(rd(IWX_CSR_GP_CNTRL))
+  _log("firmware/DMA error: " + what +
+       (bz() ? ", MSIX_FH_CAUSES " + hex(rd(IWX_CSR_MSIX_FH_INT_CAUSES_AD)) + ", GP_CNTRL " +
+                   hex(rd(IWX_CSR_GP_CNTRL))
              : "") +
        ", FH_INT_STATUS " + hex(rd(IWX_CSR_FH_INT_STATUS)));
   _fw_error = true;

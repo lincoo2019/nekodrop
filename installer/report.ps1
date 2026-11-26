@@ -31,7 +31,7 @@ Set-StrictMode -Off
 #
 # The supported IDs are iwxradio/src/cards.h's kDeviceIds, the register
 # proxy's INF and install.ps1's check: keep them in step.
-$SupportedIntelIds = @('43F0', 'A0F0', '02F0', '06F0', '34F0', '3DF0', '4DF0', '2723', '2725', '7A70', '7AF0', '51F0', '51F1', '54F0', '7F70')
+$SupportedIntelIds = @('43F0', 'A0F0', '02F0', '06F0', '34F0', '3DF0', '4DF0', '2723', '2725', '7A70', '7AF0', '51F0', '51F1', '54F0', '7F70', '7740')
 # Known Wi-Fi chips, 'vendor:device' -> kind, name. Used to name the chip and to
 # find a card that has no driver (it is then no network adapter). Never used to
 # call a device wireless by its vendor alone: Intel and Realtek make Ethernet
@@ -46,7 +46,6 @@ $WifiChips = @{
   # (Concurrent and on-demand); CNVi Wi-Fi 7 cards have no driver yet.
   '8086:272B' = @('intel-be-exp', 'Intel BE200 (Wi-Fi 7)')
   '8086:A840' = @('intel-be', 'Intel BE201/BE211 (Wi-Fi 7, CNVi)')
-  '8086:7740' = @('intel-be', 'Intel BE201/BE211 (Wi-Fi 7, CNVi)')
   '8086:E440' = @('intel-be', 'Intel Wi-Fi 7 (CNVi)')
   '8086:E340' = @('intel-be', 'Intel Wi-Fi 7 (CNVi)')
   '8086:D340' = @('intel-be', 'Intel Wi-Fi 7 (CNVi)')

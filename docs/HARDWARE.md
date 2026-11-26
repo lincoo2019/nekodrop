@@ -30,7 +30,8 @@ a card or administrator rights.
 | Cards | PCI IDs | Feasibility | What is missing |
 |---|---|---|---|
 | Intel QnJ, SnJ, Meteor Lake (Ma) | `8086:2720` `2726` `2729` `7E40` | depends on upstream | `iwxradio/src/cards.h` knows them, but ForbiddenItlwm ships no firmware for them (QuQnj API 48, SoSnj and Ma API 63). `8086:7E40` is often sold as "AX211". |
-| Intel Wi-Fi 7: BE200, BE201/BE211 | `8086:272B` `A840` `7740` `E440` … | depends on upstream | ForbiddenItlwm has no Wi-Fi 7 driver. |
+| Intel Wi-Fi 7: BE200, BE201/BE211 | `8086:272B` `A840` `E440` … | depends on upstream | ForbiddenItlwm has no Wi-Fi 7 driver. |
+| **Intel Wi-Fi 6 AX203 on Arrow Lake** (Bz/MLD) | `8086:7740` | **built-in, tested** | Its Bz-hr firmware comes from linux-firmware (fetch-deps); the MLD radio path is shared with the BE200. |
 | Another Intel device ID | `8086:*` | maybe easy | If upstream has firmware for it, adding the ID to `cards.h`, `CardCatalog.cs`, the register proxy's INF and `install.ps1` may be all. The report says *an Intel device ID nekodrop does not know*: please post it. |
 | **Realtek RTL8852CE** | `10EC:C852` | **built-in (on-demand)** | Native dual-binary backend (`nekodrop-radio-rtl.exe`, from winawdl/devourer) is built and offline-tested in CI; awaiting real-hardware confirmation inside nekodrop. See below. |
 | Other Realtek (RTL8852AE/BE, RTL8851BE, RTL8922AE, RTL8821CE/8822CE…) | `10EC:*` | low | No user-mode Windows driver; winawdl's devourer is built only for the 8852C on Windows. |

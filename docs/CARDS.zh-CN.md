@@ -29,9 +29,10 @@ nekodrop 通过模块化底层驱动后端（`CardCatalog` + `radio_backend.h`�
 | **MediaTek MT7902** | `14C3:7902` | linux-firmware `WIFI_RAM_CODE_MT7902_1`（移植自 `mt76`，同时连 Wi-Fi（仅 5 GHz）与按需接管） | ✅ 已内置；双向 AirDrop（接收约 15 MB/s，发送约 5 MB/s）与同时连 Wi-Fi 均已真机实测（[#34](../../../pull/34)、[#47](../../../pull/47)） |
 | **MediaTek MT7922 / AMD RZ616** | `14C3:0616` `14C3:7922` | linux-firmware `WIFI_RAM_CODE_MT7922_1`（`mtkradio`，同时连 Wi-Fi（仅 5 GHz，实验性）与按需接管） | 🧪 实验性，已内置；双向 AirDrop 已实测（[#40](../../../pull/40)，[docs/MT7922.md](MT7922.md)）；`v2.2.8`–`v2.2.9` 已补齐 HE80 2SS LWTBL、扫描 `FIF_BIT_CLR`、固件 RA 与 RX A-MSDU 修复（[#65](../../../pull/65)、[#66](../../../issues/66)） |
 | **MediaTek MT7921 / AMD RZ608** | `14C3:7961` `14C3:0608` | linux-firmware `WIFI_RAM_CODE_MT7961_1`（`mtkradio`，同时连 Wi-Fi（仅 5 GHz，实验性）与按需接管） | ⚠️ 实验性，已内置；按需与同时连 Wi-Fi 均尚未在真机上测试 |
+| **Intel Wi-Fi 6 AX203**（Arrow Lake，CNVi） | `8086:7740` | linux-firmware `bz-b0-hr-b0-100` + PNVM（`iwx` 的 Bz/MLD 路径，同时连 Wi-Fi / 按需） | ✅ 已在真机实测：Mac ↔ PC 双向 AirDrop，Mac 能看到本机 |
 | Intel SnJ `2726`、QnJ `2720`、Meteor Lake `7E40`/`2729` | `8086:` | 上游没有固件 | ❌ |
 | **Intel Wi-Fi 7 BE200**（独立网卡） | `8086:272B` | linux-firmware `gl-c0-fm-c0-100`（`iwx` 的 Bz/MLD 路径，同时连 Wi-Fi / 按需） | 🧪 实验性，已内置；`v2.2.9` 已加固 4096 字节页对齐与双 LMAC 诊断，欢迎实测反馈（[#53](../../../issues/53)、[docs/BE200.md](BE200.md)） |
-| Intel BE201 / BE211（Wi-Fi 7，CNVi） | `8086:` `A840` `7740` | 需要 CNVi 硬件 | ❌ |
+| Intel BE201 / BE211（Wi-Fi 7，CNVi） | `8086:` `A840` | 需要 CNVi 硬件 | ❌ |
 | 其他 Realtek、MediaTek、高通、博通 | | | ❌ |
 
 怎么看自己的网卡：打开 *设备管理器 → 网络适配器*。没有受支持的无线网卡时，安装程序会拒绝安装，并列出本机检测到的无线网卡、PCI/USB ID 和不支持原因，以及运行 `installer/report.ps1` 的指引。在未实测的网卡上（包括新内置的 Realtek RTL8852CE 后端），nekodrop 可能启动不了 radio；这时网卡不会坏，运行**[一键回退](SUPPORT.zh-CN.md)**即可，也欢迎在 [Issues](../../../issues) 附上日志反馈。

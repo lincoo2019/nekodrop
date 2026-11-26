@@ -589,6 +589,8 @@ bool IwxDevice::sta_remove_rx_ba(unsigned tid) {
                                     &cmd, sizeof(cmd), &baid);
     nic_unlock();
     if (!err) {
+      /* Buffered frames go up before the BAID can be reused. */
+      _reorder.close(_sta_baid[tid]);
       _sta_ba_tids &= static_cast<uint8_t>(~(1u << tid));
       _sta_baid[tid] = 0xff;
     } else {
@@ -640,6 +642,11 @@ bool IwxDevice::sta_add_rx_ba(unsigned tid, uint16_t ssn, uint16_t window) {
     if (err || baid >= IWX_MAX_BAID) return false;
     _sta_ba_tids |= static_cast<uint8_t>(1u << tid);
     _sta_baid[tid] = static_cast<uint8_t>(baid);
+    /* The firmware reorders by BAID/NSSN; the host does the same (Linux
+     * iwl_mvm_reorder) so the frames it releases come up in order. */
+    _reorder.open(baid, ssn, window);
+    _log("station: Block Ack open (BAID " + std::to_string(baid) + "), tid " + std::to_string(tid) +
+         ", window " + std::to_string(window));
     return true;
   }
   iwx_add_sta_cmd cmd{};
@@ -755,6 +762,9 @@ void IwxDevice::sta_leave() {
                           &cmd, sizeof(cmd), &baid);
         }
       }
+      /* Buffered frames go up before the firmware can reuse these BAIDs. */
+      for (unsigned tid = 0; tid < 8; tid++)
+        if ((_sta_ba_tids >> tid) & 1) _reorder.close(_sta_baid[tid]);
       if (_sta_sta_added && !_fw_error) {
         iwx_tx_path_flush_cmd f{};
         f.sta_id = htole32(IWX_STATION_ID);

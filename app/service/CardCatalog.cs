@@ -121,6 +121,9 @@ public static class CardCatalog
         Intel("7AF0", "AX210 / AX211 / AX411"), Intel("51F0", "AX210 / AX211 / AX411"),
         Intel("51F1", "AX210 / AX211 / AX411"), Intel("54F0", "AX210 / AX211 / AX411"),
         Intel("7F70", "AX210 / AX211 / AX411"),
+        // Intel AX203 on Arrow Lake (Bz family, HR radio): experimental, run on
+        // real hardware by the project.
+        Intel("7740", "AX203 (Bz)"),
         // Intel BE200 (Bz/Gl, Wi-Fi 7): experimental, untested on hardware; taken like
         // the other cards (the maintainer's call: restore gives the card back in one
         // step). Concurrent & on-demand, and --family be200 picks the Bz/MLD path in iwxradio.
@@ -267,10 +270,10 @@ public static class CardCatalog
         void Check(bool ok, string what) { if (!ok) fail.Add(what); }
 
         // The 15 Intel IDs the service took before the catalog (Card.DeviceIds, 0.1.20)
-        // plus Realtek RTL8852CE (10EC:C852), MediaTek MT7902 (14C3:7902), and
-        // MediaTek MT7922/MT7921 (14C3:0616, 7922, 7961, 0608) = 21 active profiles.
+        // plus the AX203 (7740), Realtek RTL8852CE (10EC:C852), MediaTek MT7902
+        // (14C3:7902), and MediaTek MT7922/MT7921 (14C3:0616, 7922, 7961, 0608) = 23 active profiles.
         string[] intel = ["43F0", "A0F0", "02F0", "06F0", "34F0", "3DF0", "4DF0",
-                          "2723", "2725", "7A70", "7AF0", "51F0", "51F1", "54F0", "7F70"];
+                          "2723", "2725", "7A70", "7AF0", "51F0", "51F1", "54F0", "7F70", "7740"];
         Check(ActiveProfiles.Count == intel.Length + 7, $"{ActiveProfiles.Count} active profiles, expected {intel.Length + 7}");
         Check(AllProfiles.Count == ActiveProfiles.Count, $"{AllProfiles.Count} total profiles, expected {ActiveProfiles.Count}");
         foreach (var dev in intel)
