@@ -622,6 +622,12 @@ public sealed class Supervisor : IDisposable
                     });
                 }
                 break;
+            case "wifi-yield":
+                // The radio pauses the station during AirDrop transfers: the
+                // gateway cannot answer then, and the probe must not rejoin.
+                // A pause lasts at most 20 s, so "on" needs no "off" to expire.
+                lock (_lock) _yieldUntil = DateTime.UtcNow + (value == "on" ? YieldGrace * 2 : YieldGrace);
+                break;
             case "wifi":
                 lock (_lock)
                 {
@@ -856,6 +862,9 @@ public sealed class Supervisor : IDisposable
     DateTime _probeAt = DateTime.MinValue, _connectedAt = DateTime.MaxValue, _scanStartedAt = DateTime.MinValue;
     System.Net.IPAddress? _probeGateway;
     DateTime _rejoinAt = DateTime.MinValue;
+    /// <summary>Until when the station is paused for AirDrop ("event: wifi-yield"), plus a grace period.</summary>
+    DateTime _yieldUntil = DateTime.MinValue;
+    static readonly TimeSpan YieldGrace = TimeSpan.FromSeconds(30);
     int _probeFails;
     bool _gatewayAnswered, _rejoinAsked;
 
@@ -906,6 +915,8 @@ public sealed class Supervisor : IDisposable
         }
         if (_connectedAt == DateTime.MaxValue) _connectedAt = DateTime.UtcNow;
         if (DateTime.UtcNow - _connectedAt < TimeSpan.FromSeconds(20)) return; /* DHCP first */
+        lock (_lock)
+            if (DateTime.UtcNow < _yieldUntil) return; /* paused for AirDrop, not judged */
         var adapter = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
             .FirstOrDefault(n => n.Name == "nekodrop" && n.OperationalStatus == System.Net.NetworkInformation.OperationalStatus.Up);
         var props = adapter?.GetIPProperties();

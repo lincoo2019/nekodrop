@@ -208,6 +208,8 @@ void WifiStation::stop() {
   if (_state == State::Idle) return;
   _tap.set_connected(false);
   _dev.sta_leave();
+  _yield = _yield_paused = false;
+  _yield_at = 0;
   _state = State::Idle;
 }
 
@@ -225,6 +227,8 @@ void WifiStation::reset_join_state() {
   _sae_sc = 0;
   _sae_tokens = 0;
   _igtk_valid = _igtk_in_fw_valid = false;
+  _yield = _yield_paused = false; /* sta_leave() ended any pause */
+  _yield_at = 0;
 }
 
 std::vector<uint8_t> WifiStation::rsn_ie() const { return build_rsn_ie(static_cast<uint8_t>(_akm), _pmf); }
@@ -913,8 +917,44 @@ bool WifiStation::send_data(const uint8_t *da, uint16_t ethertype, const uint8_t
   return true;
 }
 
+void WifiStation::send_null(bool power_save) {
+  std::vector<uint8_t> f(24, 0);
+  f[0] = 0x48;                                                     /* null data */
+  f[1] = static_cast<uint8_t>(0x01 | (power_save ? 0x10 : 0)); /* ToDS, PM */
+  std::memcpy(&f[4], _cfg.bssid, 6);
+  std::memcpy(&f[10], _addr.data(), 6);
+  std::memcpy(&f[16], _cfg.bssid, 6);
+  _dev.sta_transmit(f.data(), f.size(), mgmt_rate(), false);
+}
+
+bool WifiStation::set_yield(bool on) {
+  if (on == _yield) return true;
+  if (on) {
+    if (_state != State::Running || _yield_unsupported) return false;
+    send_null(true);
+    _yield = true;
+    _yield_at = _now + 30000; /* the null frame's turn on the air */
+    return true;
+  }
+  _yield = false;
+  _yield_at = 0;
+  if (_yield_paused) {
+    _yield_paused = false;
+    if (!_dev.sta_pause(false)) {
+      fail("the firmware did not bring the station link back");
+      return false;
+    }
+  }
+  if (_state == State::Running) send_null(false);
+  return true;
+}
+
 void WifiStation::on_ethernet(const uint8_t *frame, size_t len) {
   if (_state != State::Running || len < 14) return;
+  if (_yield) {
+    _yield_dropped++;
+    return;
+  }
   /* The adapter's own address is ours; anything else would be bridged
    * traffic, which a station may not send. */
   if (std::memcmp(frame + 6, _addr.data(), 6) != 0) return;
@@ -1171,6 +1211,17 @@ void WifiStation::tick(uint64_t now_us) {
   /* First tick after start() before _now was populated: anchor _state_since so
    * Listening genuinely waits for a beacon instead of timing out immediately. */
   if (_state != State::Idle && _state_since == 0) _state_since = now_us;
+  if (_yield && !_yield_paused && _yield_at && now_us >= _yield_at) {
+    _yield_at = 0;
+    if (_state == State::Running && _dev.sta_pause(true)) {
+      _yield_paused = true;
+    } else {
+      _yield = false;
+      _yield_unsupported = true;
+      _log("station: the link cannot be paused here; AWDL keeps sharing the radio with it");
+      if (_state == State::Running) send_null(false);
+    }
+  }
   /* Keys go in once message 4 has left, for the first handshake and for a
    * rekey alike (Codex review #2: rekeys used to be acknowledged and never
    * installed). */

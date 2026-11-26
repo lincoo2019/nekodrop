@@ -76,6 +76,13 @@ public:
     uint64_t data = 0, unicast = 0, undecrypted = 0, not_llc = 0, amsdu = 0, tap_failed = 0;
   };
   const RxStats &rx_stats() const { return _rx; }
+  /* Off the AP's channel while AWDL carries a transfer (sta_yield.h): a null
+   * frame with the power-management bit asks the AP to buffer, then the
+   * backend pauses the link; false brings it back and clears the bit.
+   * Windows' frames are dropped meanwhile. False if the backend cannot. */
+  bool set_yield(bool on);
+  bool yielded() const { return _yield; }
+  uint64_t yield_dropped() const { return _yield_dropped; }
   /* Leaves and joins again in 5 s (the radio's stall watchdog). */
   void rejoin(const std::string &why) {
     if (_state != State::Idle && _state != State::Failed) fail(why);
@@ -107,6 +114,7 @@ private:
   void learn_beacon(const uint8_t *f, size_t len);
   void fail(const std::string &why);
   bool send_data(const uint8_t *da, uint16_t ethertype, const uint8_t *payload, size_t len, bool protect);
+  void send_null(bool power_save);
   bool derive_ptk(const uint8_t anonce[32], uint8_t out[48]);
   /* The KCK (and KEK at +16) of the handshake in progress: the pending PTK
    * during a rekey, else the one in use. */
@@ -126,6 +134,9 @@ private:
   State _state = State::Idle;
   uint64_t _now = 0, _state_since = 0, _last_try = 0;
   unsigned _tries = 0, _joins = 0;
+  /* set_yield: the null frame goes first, the link pauses at _yield_at. */
+  bool _yield = false, _yield_paused = false, _yield_unsupported = false;
+  uint64_t _yield_at = 0, _yield_dropped = 0;
 
   /* Key management: AKM suite type in 00-0F-AC (0 = none, an open network). */
   enum class Akm : uint8_t { None = 0, Psk = 2, PskSha256 = 6, Sae = 8, Owe = 18 };

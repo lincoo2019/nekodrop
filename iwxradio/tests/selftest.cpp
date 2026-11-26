@@ -14,6 +14,7 @@
 #include "../src/fw.h"
 #include "../src/awdl_policy.h"
 #include "../src/coex_plan.h"
+#include "../src/sta_yield.h"
 #include "../src/crypto.h"
 #include "../src/wpa3.h"
 #include "radio_backend_test.h"
@@ -241,6 +242,43 @@ int main(int argc, char **argv) {
     const uint8_t tlv12[] = {12, 4, 0, 0, 0, 'J', 'P'};
     f.insert(f.end(), tlv12, tlv12 + sizeof(tlv12));
     CHECK(awdl::is_awdl_action(f.data(), f.size()), "AWDL action frame recognised");
+    {
+      /* Station pause during AWDL transfers (sta_yield.h), 100 ms ticks. */
+      using sta_yield::Action;
+      sta_yield::Controller y;
+      uint64_t t = 1000000, n = 0;
+      Action a = Action::None;
+      for (int i = 0; i < 30; i++, t += 100000) a = y.tick(t, n += (i % 3 == 0), true);
+      CHECK(!y.paused, "station stays on the air for AWDL discovery's trickle (3 frames/s)");
+      for (int i = 0; i < 10 && !y.paused; i++, t += 100000) a = y.tick(t, n += 5, true);
+      CHECK(y.paused && a == Action::Pause && y.why == sta_yield::Why::Busy, "an AWDL transfer pauses the station");
+      sta_yield::Controller z = y;
+      CHECK(z.tick(t, n + 50, false) == Action::Resume, "station down or on AWDL's channel ends the pause");
+      for (int i = 0; i < 5; i++, t += 100000) a = y.tick(t, n += 5, true);
+      CHECK(y.paused, "pause holds while the transfer runs");
+      bool resumed = false;
+      for (int i = 0; i < 30; i++, t += 100000) a = y.tick(t, i == 0 ? n += 40 : n, true);
+      CHECK(y.paused, "a 3 s retransmission gap does not end the pause");
+      for (int i = 0; i < 80 && !resumed; i++, t += 100000) resumed = y.tick(t, n, true) == Action::Resume;
+      CHECK(resumed && y.why == sta_yield::Why::Idle, "AWDL idle for 5 s brings the station back");
+      for (int i = 0; i < 300 && y.why != sta_yield::Why::Visit; i++, t += 100000) y.tick(t, n += 5, true);
+      CHECK(y.why == sta_yield::Why::Visit && !y.paused, "a long transfer still visits the access point");
+      bool early = false;
+      const uint64_t back = t;
+      for (; t - back < sta_yield::kVisitUS - 100000; t += 100000) early |= y.tick(t, n += 5, true) == Action::Pause;
+      CHECK(!early, "the visit lasts its full time");
+    }
+    {
+      awdl::AddbaRequest r{};
+      r.token = 9;
+      r.tid = 0;
+      r.window = 64;
+      uint8_t own[6] = {2, 0, 0, 0, 0, 1}, out[awdl::kAddbaResponseLength];
+      awdl::build_addba_response(out, r, own, 1, false, awdl::kAddbaDeclined);
+      CHECK(out[26] == 9 && out[27] == 37 && out[28] == 0, "ADDBA declined: token kept, status 37");
+      awdl::build_addba_response(out, r, own, 1);
+      CHECK(out[27] == 0 && out[28] == 0, "ADDBA accepted: status 0");
+    }
     {
       /* FCS (#24/#25): CRC-32 check value, then a frame with its FCS. */
       const uint8_t nine[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};

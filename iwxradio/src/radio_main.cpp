@@ -12,7 +12,7 @@
  *          [--mac-type listener|ibss|sta] [--firmware DIR]
  *          [--data-rate 6|12|24|36|48|54|MCS0..MCS15] [--verbose]
  *          [--tx-window N] [--aggregate] [--fast-unlock] [--coex-plan] [--family qu|ax200|ax210|so|be200]
- *          [--bt-coex 1|2|3]
+ *          [--bt-coex 1|2|3] [--sta-yield] [--sta-yield-short] [--bz-block-ack]
  * winawdl's own options (--retries, --capture, --no-block-ack,
  * --no-aggregate, --no-quick-submit) are accepted and ignored.
  */
@@ -40,6 +40,7 @@
 
 #include "awdl_policy.h"
 #include "coex_plan.h"
+#include "sta_yield.h"
 #include "awdl_schedule.h"
 #include "iwx.h"
 #include "wifi_sta.h"
@@ -77,7 +78,9 @@ struct Options {
   RadioOpenOptions dev; /* any backend's open() takes these */
   TxRate data_rate{TxRate::Legacy, 48, 0}; /* 24 Mb/s */
   bool fixed_rate = false;  /* --data-rate given: no rate ladder */
-  bool no_block_ack = false;
+  bool no_block_ack = false; /* decline every peer's receive Block Ack */
+  /* --bz-block-ack: accept receive Block Ack on Bz cards (declined by default). */
+  bool bz_block_ack = false;
   std::string sta_config; /* --sta-config: join this network beside AWDL */
   /* Test mode: serve the pipe without touching the card, and report what the
    * client sends. Checks the radio link against awdld with no hardware. */
@@ -106,6 +109,16 @@ struct Options {
    * another 5 GHz channel than AWDL, name the router in some of our 16
    * entries, stay silent and hold aggregate sending in them (coex_plan.h). */
   bool coex_plan = false;
+  /* --sta-yield: pause the station link during AWDL transfers (sta_yield.h).
+   * On by default: with the station on another channel the firmware keeps
+   * leaving the AWDL channel and the iPhone's unicast frames are lost, which
+   * drops a transfer from 3 MB/s to KB/s (hardware, AX203, 2026-11-27).
+   * --no-sta-yield turns it off. */
+  bool sta_yield = true;
+  /* A pause lasts until AWDL is idle for 30 s (at most 120 s between visits
+   * to the access point), so it covers a whole AirDrop session: ask, the
+   * user's accept, upload. --sta-yield-short: 5 s idle, 20 s pauses. */
+  bool sta_yield_hold = true;
 };
 
 bool parse_rate(const std::string &s, TxRate &rate) {
@@ -151,10 +164,14 @@ bool parse_options(int argc, char **argv, Options &o) {
     else if (a == "--sta-config") o.sta_config = value();
     else if (a == "--retries" || a == "--capture") value();
     else if (a == "--no-block-ack") o.no_block_ack = true;
+    else if (a == "--bz-block-ack") o.bz_block_ack = true;
     else if (a == "--aggregate") o.aggregate = o.dev.aggregate = true;
     else if (a == "--he80") o.he80 = o.dev.he80 = true;
     else if (a == "--fast-unlock") o.fast_unlock = true;
     else if (a == "--coex-plan") o.coex_plan = true;
+    else if (a == "--no-sta-yield") o.sta_yield = false;
+    else if (a == "--sta-yield") o.sta_yield = true;
+    else if (a == "--sta-yield-short") o.sta_yield_hold = false;
     else if (a == "--family") {
       o.dev.family_device = cards::family_device(value());
       if (!o.dev.family_device) return false;
@@ -520,6 +537,11 @@ int main(int argc, char **argv) {
       uint32_t changes = 0;
     } plan;
     uint32_t rx_data_to_us = 0;
+    /* AWDL unicast data frames both ways, and the station's pause during
+     * AWDL transfers (sta_yield.h). */
+    uint64_t awdl_unicast_data = 0, yield_tick_us = 0;
+    sta_yield::Controller yield;
+    bool yield_announced = false;
     int8_t awdl_dbm = -127;
     /* Discovery timing (#4: ~99 s to see the iPhone, #11: ~2 min): one line
      * when the first AWDL frame, the first MIF and the first frame addressed
@@ -791,6 +813,7 @@ int main(int argc, char **argv) {
         if (++rx_to_us == 1) milestone("frame addressed to us", "");
         if ((f.data[0] & 0x0c) == 0x08) {
           rx_data_to_us++;
+          awdl_unicast_data++;
           plan.last_data_us = now_us();
         }
         awdl::AddbaRequest req;
@@ -1059,11 +1082,21 @@ int main(int argc, char **argv) {
     const size_t fast_channel_count = radio::fast_discovery_channels(opt.channel, fast_channels);
     if (opt.fast_unlock) log_line(radio::kFastUnlockOnLine);
     if (opt.coex_plan) log_line("experimental coexistence plan: on (router entries in our schedule when the station is on another 5 GHz channel)");
+    if (opt.sta_yield_hold) {
+      yield.idle_us = 30000000;
+      yield.max_pause_us = 120000000;
+    }
+    if (sta)
+      log_line(!opt.sta_yield        ? "station pause for AWDL transfers: off"
+               : opt.sta_yield_hold ? "station pause for AWDL transfers: on, held until AWDL is idle for 30 s"
+                                    : "station pause for AWDL transfers: on");
+    if (opt.no_block_ack || (bz_card && !opt.bz_block_ack))
+      log_line("Block Ack: peers' receive sessions declined (status 37); they send unaggregated");
     if constexpr (caps.supports_aggregate) agg.on = opt.aggregate && dev.agg_available();
     if (opt.aggregate) log_line(agg.on ? "A-MPDU sending: on" : "A-MPDU sending: not available on this path");
     awdl::BaFilter ba_filter;
     uint16_t mgmt_seq = 0;
-    uint64_t ba_answers = 0;
+    uint64_t ba_answers = 0, ba_declined = 0;
     ready = true;
     log_line("ready on channel " + std::to_string(opt.channel) + ", waiting for a client");
 
@@ -1131,6 +1164,7 @@ int main(int argc, char **argv) {
           TxRate rate;
           const bool unicast = !(frame[4] & 1);
           const bool data = (frame[0] & 0x0c) == 0x08;
+          if (data && unicast) awdl_unicast_data++;
           if (opt.coex_plan) {
             const uint64_t t = now_us();
             if (data && unicast) {
@@ -1196,7 +1230,9 @@ int main(int argc, char **argv) {
             dev.transmit(frame, len, rate);
           }
         } else if (req.type == kRejoinRequest) {
-          if (sta) {
+          if (sta && sta->yielded()) {
+            log_line("wifi: rejoin ignored, the station is paused for an AWDL transfer");
+          } else if (sta) {
             log_line("event: wifi-stall");
             sta->rejoin("the gateway stopped answering");
           }
@@ -1234,13 +1270,20 @@ int main(int argc, char **argv) {
         while (!addba_pending.empty()) {
           const awdl::AddbaRequest r = addba_pending.front();
           addba_pending.pop_front();
-          if (!r.immediate || opt.no_block_ack) continue;
-          if (!dev.add_rx_ba(r.peer, r.tid, r.ssn, r.window, r.token)) continue;
+          if (!r.immediate) continue;
+          /* Bz: the firmware's receive sessions stall the peer. Each lasts
+           * 1-3 s and carries 5-10 frames before the iPhone deletes it and
+           * asks again, ~7 KB/s; the one fast upload went unaggregated
+           * (hardware, AX203, 2026-11-26). */
+          const bool decline = opt.no_block_ack || (bz_card && !opt.bz_block_ack);
+          if (!decline && !dev.add_rx_ba(r.peer, r.tid, r.ssn, r.window, r.token)) continue;
           uint8_t answer[awdl::kAddbaResponseLength];
-          awdl::build_addba_response(answer, r, dev_address, ++mgmt_seq, opt.he80);
+          awdl::build_addba_response(answer, r, dev_address, ++mgmt_seq, opt.he80,
+                                     decline ? awdl::kAddbaDeclined : 0);
           if (may_send()) {
             uq.push_front({std::vector<uint8_t>(answer, answer + sizeof(answer)), TxRate{}, false});
-            ba_answers++;
+            if (decline) ba_declined++;
+            else ba_answers++;
           }
         }
         while (!delba_pending.empty()) {
@@ -1460,11 +1503,39 @@ int main(int argc, char **argv) {
           }
         }
       }
+      if constexpr (caps.supports_station) if (opt.sta_yield && sta) {
+        const uint64_t t = now_us();
+        if (t - yield_tick_us >= 100000) {
+          yield_tick_us = t;
+          /* The station failed, rejoined or could not pause meanwhile. */
+          if (yield.paused && !sta->yielded()) yield.resumed(t);
+          const auto &sp = dev.sta_params();
+          const bool eligible = sta->state() == WifiStation::State::Running && sp.channel &&
+                                sp.channel != dev.channel();
+          sta_yield::Action a = yield.tick(t, awdl_unicast_data, eligible);
+          if (a == sta_yield::Action::Pause && !sta->set_yield(true)) {
+            yield.refused(t);
+            a = sta_yield::Action::None;
+          } else if (a == sta_yield::Action::Resume) {
+            sta->set_yield(false);
+          }
+          if (a != sta_yield::Action::None)
+            log_line(std::string("station: ") + (yield.paused ? "paused" : "back on channel " + std::to_string(sp.channel)) +
+                     " (" + sta_yield::why_name(yield.why) + "); " + std::to_string(yield.pauses) + " pauses, " +
+                     std::to_string(yield.paused_us / 1000000) + " s paused, " +
+                     std::to_string(sta->yield_dropped()) + " frames from Windows dropped");
+          const bool on = yield.paused && sta->yielded();
+          if (on != yield_announced) {
+            yield_announced = on;
+            log_line(std::string("event: wifi-yield ") + (on ? "on" : "off"));
+          }
+        }
+      }
       if constexpr (caps.supports_station) if (opt.coex_plan) {
         const uint64_t t = now_us();
         if (t - plan.tick_us >= 100000) {
           plan.tick_us = t;
-          const bool up = sta && sta->state() == WifiStation::State::Running;
+          const bool up = sta && sta->state() == WifiStation::State::Running && !sta->yielded();
           if (up) plan.meter.note(t, sta->rx_packets() + sta->tx_packets(), sta->rx_bytes() + sta->tx_bytes());
           const auto &sp = dev.sta_params();
           const bool moving = plan.last_data_us && t - plan.last_data_us < awdl_plan::kDataHoldUS;
@@ -1689,6 +1760,7 @@ int main(int argc, char **argv) {
                  std::to_string(missing_status) + " missing TX status; rate step " +
                  std::to_string(ladder.step) + " (" + std::to_string(ladder.ups) + " up, " +
                  std::to_string(ladder.downs) + " down); BA answers " + std::to_string(ba_answers) +
+                 (ba_declined ? ", " + std::to_string(ba_declined) + " declined" : "") +
                  (promiscuous ? "" : ", promiscuous off") +
                  (tx_held_passive ? "; " + std::to_string(tx_held_passive) + " held (passive channel)" : ""));
         if constexpr (caps.supports_aggregate) if (agg.on) log_agg_snapshot();

@@ -349,10 +349,23 @@ bool IwxDevice::sta_associated(uint16_t aid, uint8_t dtim_period) {
     if (!err) err = mld_sta_mac_cmd(IWX_FW_CTXT_ACTION_MODIFY, true);
     if (!err) err = mld_sta_cfg_ap(true);
     if (!err) {
+      /* Power save for the station: the firmware dozes between the access
+       * point's beacons instead of dwelling on its channel, which otherwise
+       * cuts AWDL A-MPDU bursts (Concurrent mode: iPhone uploads stalled at
+       * a few KB/s while the station was associated). */
       iwx_mac_power_cmd pm{};
       pm.id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(kStaMac, 0));
+      pm.flags = htole16(IWX_POWER_FLAGS_POWER_SAVE_ENA_MSK |
+                         IWX_POWER_FLAGS_POWER_MANAGEMENT_ENA_MSK);
       pm.keep_alive_seconds = htole16(25);
-      send_cmd(IWX_MAC_PM_POWER_TABLE, &pm, sizeof(pm), false, nullptr);
+      pm.rx_data_timeout = htole32(50000);
+      pm.tx_data_timeout = htole32(50000);
+      const int e = send_cmd(IWX_MAC_PM_POWER_TABLE, &pm, sizeof(pm), false, nullptr);
+      iwx_device_power_cmd pw{};
+      pw.flags = htole16(IWX_DEVICE_POWER_FLAGS_POWER_SAVE_ENA_MSK);
+      const int e2 = send_cmd(IWX_POWER_TABLE_CMD, &pw, sizeof(pw), false, nullptr);
+      _log(e || e2 ? "station: power save refused (" + std::to_string(e ? e : e2) + ")"
+                   : "station: power save on, the radio is free for AWDL");
     }
     nic_unlock();
     if (err) {
@@ -411,6 +424,38 @@ bool IwxDevice::sta_associated(uint16_t aid, uint8_t dtim_period) {
   _sta_assoc = true;
   _log("station: associated, AID " + std::to_string(_sta_aid));
   return true;
+}
+
+bool IwxDevice::sta_pause(bool pause) {
+  if (pause == _sta_paused) return true;
+  if (!use_mld() || !_sta_assoc || !_sta_link_added || _fw_error) return false;
+  if (!nic_lock()) return false;
+  int err = 0;
+  if (pause) {
+    /* Nothing left queued for the AP on a link that stops (Linux flushes the
+     * station before a link leaves its channel context). */
+    iwx_tx_path_flush_cmd f{};
+    f.sta_id = htole32(IWX_STATION_ID);
+    f.tid_mask = htole16(0xffff);
+    if (const int e = send_cmd(IWX_TXPATH_FLUSH, &f, sizeof(f), false, nullptr))
+      _log("station: could not flush before pausing (" + std::to_string(e) + ")");
+    err = mld_sta_link_modify(false, IWX_LINK_CONTEXT_MODIFY_ACTIVE);
+    if (!err) {
+      _sta_paused = true;
+      _sta_link_active = false;
+    }
+  } else {
+    err = mld_sta_link_modify(true, IWX_LINK_CONTEXT_MODIFY_ACTIVE | IWX_LINK_CONTEXT_MODIFY_RATES_INFO |
+                                        IWX_LINK_CONTEXT_MODIFY_QOS_PARAMS);
+    if (!err) {
+      _sta_paused = false;
+      _sta_link_active = true;
+    }
+  }
+  nic_unlock();
+  if (err)
+    _log(std::string("station: link ") + (pause ? "pause" : "resume") + " refused (" + std::to_string(err) + ")");
+  return !err;
 }
 
 bool IwxDevice::sta_set_key(bool group, unsigned key_index, const uint8_t key[16]) {
@@ -772,6 +817,16 @@ void IwxDevice::sta_leave() {
         if (const int e = send_cmd(IWX_TXPATH_FLUSH, &f, sizeof(f), false, nullptr))
           _log("station: MLD could not flush before removing it (" + std::to_string(e) + ")");
       }
+      if (_sta_sta_added && !_fw_error) {
+        /* Back to continuous awake before the station goes. */
+        iwx_device_power_cmd pw{};
+        pw.flags = 0;
+        send_cmd(IWX_POWER_TABLE_CMD, &pw, sizeof(pw), false, nullptr);
+        iwx_mac_power_cmd pm{};
+        pm.id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(kStaMac, 0));
+        pm.keep_alive_seconds = htole16(25);
+        send_cmd(IWX_MAC_PM_POWER_TABLE, &pm, sizeof(pm), false, nullptr);
+      }
       if (_sta_queue_enabled && !_fw_error) {
         if (const int e = disable_queue(IWX_STATION_ID, IWX_MGMT_TID))
           _log("station: MLD could not disable queue (" + std::to_string(e) + ")");
@@ -800,6 +855,7 @@ void IwxDevice::sta_leave() {
     }
     _sta_phy_added = _sta_mac_added = _sta_binding_added = _sta_link_added = _sta_link_active = false;
     _sta_sta_added = _sta_queue_enabled = _sta_assoc = _sta_tlc = _sta_session_prot = _sta_mfp = false;
+    _sta_paused = false;
     _sta_ba_tids = _sta_gtk_mask = _sta_igtk_id = 0;
     _sta_ptk_flags = 0;
     std::memset(_sta_baid, 0xff, sizeof(_sta_baid));

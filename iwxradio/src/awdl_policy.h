@@ -253,8 +253,11 @@ inline bool ba_tx_session_idle(bool bulk, size_t waiting, unsigned queued, uint6
   return since && now_us - since >= kBaTxIdleEndUS;
 }
 
+/* Status 37 (REQUEST_DECLINED): the peer sends unaggregated and does not
+ * keep asking, unlike a request left unanswered. */
+constexpr uint16_t kAddbaDeclined = 37;
 inline size_t build_addba_response(uint8_t *out, const AddbaRequest &r, const uint8_t *own, uint16_t seq,
-                                   bool allow_amsdu = false) {
+                                   bool allow_amsdu = false, uint16_t status = 0) {
   std::memset(out, 0, kAddbaResponseLength);
   out[0] = 0xd0;
   std::memcpy(out + 4, r.peer, 6);
@@ -266,7 +269,8 @@ inline size_t build_addba_response(uint8_t *out, const AddbaRequest &r, const ui
   out[24] = 3;
   out[25] = 1;
   out[26] = r.token;
-  /* 27-28: status 0, success. */
+  out[27] = uint8_t(status);
+  out[28] = uint8_t(status >> 8);
   const uint16_t amsdu_bit = (allow_amsdu && r.amsdu) ? 1U : 0U;
   const uint16_t params = uint16_t(amsdu_bit | 2U | unsigned(r.tid) << 2 | unsigned(r.window) << 6);
   out[29] = uint8_t(params);

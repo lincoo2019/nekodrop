@@ -169,6 +169,12 @@ public:
   bool sta_add_rx_ba(unsigned tid, uint16_t ssn, uint16_t window);
   bool sta_remove_rx_ba(unsigned tid);
   void sta_leave();
+  /* The station link off the air while AWDL carries a transfer (MLD
+   * firmware): the firmware stops visiting the AP's channel and frames to
+   * the AP are dropped until sta_pause(false). False where unsupported. */
+  bool sta_pause(bool pause);
+  bool sta_paused() const { return _sta_paused; }
+  unsigned sta_pause_dropped() const { return _sta_pause_dropped; }
   bool sta_active() const { return _sta_mac_added; }
   const StaParams &sta_params() const { return _sta; }
   using TxStatusHandler = RadioTxStatusHandler;
@@ -402,7 +408,9 @@ private:
   bool _sta_phy_added = false, _sta_mac_added = false, _sta_binding_added = false,
        _sta_link_added = false, _sta_link_active = false,
        _sta_sta_added = false, _sta_queue_enabled = false, _sta_shared_binding = false,
-       _sta_assoc = false, _sta_tlc = false, _sta_session_prot = false, _sta_mfp = false;
+       _sta_assoc = false, _sta_tlc = false, _sta_session_prot = false, _sta_mfp = false,
+       _sta_paused = false;
+  unsigned _sta_pause_dropped = 0;
   uint16_t _sta_aid = 0;
   uint8_t _sta_dtim = 1, _sta_ba_tids = 0, _sta_gtk_mask = 0, _sta_igtk_id = 0;
   uint32_t _sta_ptk_flags = 0;

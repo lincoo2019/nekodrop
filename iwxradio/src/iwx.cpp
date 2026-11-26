@@ -1328,7 +1328,7 @@ void IwxDevice::stop() {
   _proxy.set_close_ops({});
   _open = false;
   _phy_added = _mac_added = _binding_added = _link_added = _link_active = _sta_added = _queue_enabled = false;
-  _sta_link_added = _sta_link_active = false;
+  _sta_link_added = _sta_link_active = _sta_paused = false;
   _use_mld = false;
   _ba_station = _agg_queue_enabled = _agg_active = false;
   _ba_tids = 0;
@@ -2762,6 +2762,10 @@ void IwxDevice::kick_data() {
 
 int IwxDevice::sta_transmit(const uint8_t *frame, size_t len, const TxRate &rate, bool encrypt) {
   if (!_sta_queue_enabled || _fw_error) return -1;
+  if (_sta_paused) {
+    _sta_pause_dropped++;
+    return -1;
+  }
   return transmit_on(_staq, frame, len, rate, encrypt);
 }
 
