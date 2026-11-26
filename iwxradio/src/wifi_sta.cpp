@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Station state machine. Frame layouts are IEEE 802.11-2016 (9.3.3, 9.4.2,
- * 12.7); the WPA2 handshake follows 12.7.6 with key descriptor version 2
- * (HMAC-SHA1 MIC, AES key wrap), the one AKM 2 uses.
+ * 12.7); the 4-way handshake follows 12.7.6: key descriptor version 2
+ * (HMAC-SHA1 MIC, PRF-SHA1) for AKM 2, version 3 (AES-CMAC, KDF-SHA256) for
+ * AKM 6, and AKM-defined (0) for SAE (AES-CMAC) and OWE (HMAC-SHA256-128),
+ * both with KDF-SHA256. SAE is 12.4 (hostap's sae.c), OWE RFC 8110.
  */
 #include "wifi_sta.h"
 
@@ -13,7 +15,6 @@
 
 #include "awdl_policy.h"
 #include "crypto.h"
-#include "iwxreg.h"
 
 namespace {
 
@@ -71,10 +72,19 @@ void put_be16(std::vector<uint8_t> &v, uint16_t x) {
 uint16_t be16(const uint8_t *p) { return static_cast<uint16_t>(p[0] << 8 | p[1]); }
 uint16_t le16(const uint8_t *p) { return static_cast<uint16_t>(p[0] | p[1] << 8); }
 
-/* WPA2-PSK, CCMP pairwise and group: what we ask for and accept. */
-std::vector<uint8_t> our_rsn_ie() {
+/* CCMP pairwise and group with one AKM; RSN capabilities MFPC/MFPR when
+ * management frames are protected. AKM 2 without PMF is the bytes nekodrop
+ * always sent. */
+std::vector<uint8_t> build_rsn_ie(uint8_t akm, bool pmf) {
+  const uint8_t caps = pmf ? 0xc0 : 0x00; /* MFPR | MFPC */
   return {0x30, 0x14, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x04, 0x01, 0x00, 0x00, 0x0f,
-          0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, 0x02, 0x00, 0x00};
+          0xac, 0x04, 0x01, 0x00, 0x00, 0x0f, 0xac, akm,  caps, 0x00};
+}
+
+uint64_t le48(const uint8_t *p) {
+  uint64_t v = 0;
+  for (int i = 5; i >= 0; i--) v = v << 8 | p[i];
+  return v;
 }
 
 TxRate mgmt_rate() {
@@ -82,6 +92,23 @@ TxRate mgmt_rate() {
   r.kind = TxRate::Legacy;
   r.mbps_x2 = 12; /* 6 Mb/s OFDM: valid in both bands */
   return r;
+}
+
+/* An authentication frame's header and fixed fields (9.3.3.12). */
+std::vector<uint8_t> auth_frame(const uint8_t *bssid, const uint8_t *addr, uint16_t &mgmt_seq, uint16_t alg,
+                                uint16_t txn, uint16_t status) {
+  std::vector<uint8_t> f(24, 0);
+  f[0] = 0xb0;
+  std::memcpy(&f[4], bssid, 6);
+  std::memcpy(&f[10], addr, 6);
+  std::memcpy(&f[16], bssid, 6);
+  ++mgmt_seq;
+  f[22] = static_cast<uint8_t>(mgmt_seq << 4);
+  f[23] = static_cast<uint8_t>(mgmt_seq >> 4);
+  put_le16(f, alg);
+  put_le16(f, txn);
+  put_le16(f, status);
+  return f;
 }
 
 } // namespace
@@ -152,7 +179,9 @@ bool WifiStation::start(const StaConfig &cfg, std::string &error) {
   if (!_tap.is_open() && !_tap.open(_cfg.tap, error)) return false;
   _addr = _tap.mac();
   _tap.set_connected(false);
-  _rsn_ie = our_rsn_ie();
+  _akm = _cfg.open ? Akm::None : Akm::Psk;
+  _pmf = false;
+  _rsn_ie = rsn_ie();
   StaParams p{};
   std::memcpy(p.bssid, _cfg.bssid, 6);
   std::memcpy(p.addr, _addr.data(), 6);
@@ -164,6 +193,7 @@ bool WifiStation::start(const StaConfig &cfg, std::string &error) {
   }
   _joins++;
   reset_join_state();
+  _beacon_seen = false;
   _state = State::Listening;
   _state_since = _now;
   _tries = 0;
@@ -190,6 +220,61 @@ void WifiStation::reset_join_state() {
   _last_reply.clear();
   _addba_answers.clear();
   _ba_token_valid = 0;
+  _sae_step = SaeStep::None;
+  _sae_token.clear();
+  _sae_sc = 0;
+  _sae_tokens = 0;
+  _igtk_valid = _igtk_in_fw_valid = false;
+}
+
+std::vector<uint8_t> WifiStation::rsn_ie() const { return build_rsn_ie(static_cast<uint8_t>(_akm), _pmf); }
+
+const char *WifiStation::akm_name() const {
+  switch (_akm) {
+  case Akm::None: return "open";
+  case Akm::Psk: return _pmf ? "WPA2, protected management frames" : "WPA2";
+  case Akm::PskSha256: return "WPA2-SHA256";
+  case Akm::Sae: return "WPA3";
+  case Akm::Owe: return "Enhanced Open";
+  }
+  return "?";
+}
+
+/* WPA2 first when offered (as before, and what WPA2/WPA3 mixed networks
+ * accept), then PSK-SHA256, then SAE; OWE for an open network that offers it. */
+std::string WifiStation::choose_akm() {
+  _pmf = false;
+  const auto has = [&](unsigned akm) { return (_ap_akms >> akm) & 1; };
+  if (_cfg.open) {
+    _akm = Akm::None;
+    if (_beacon_seen && _ap_rsn && has(18)) {
+      if (!_ap_pairwise_ccmp) return "the network does not offer CCMP";
+      _akm = Akm::Owe;
+      _pmf = true;
+    }
+  } else if (!_beacon_seen || !_ap_rsn) {
+    _akm = Akm::Psk; /* no beacon yet: try WPA2, as always */
+  } else if (!_ap_pairwise_ccmp) {
+    return "the network offers only TKIP, which is not supported";
+  } else if (has(2)) {
+    _akm = Akm::Psk;
+    _pmf = _ap_mfpr; /* only where the network requires it: mixed networks stay as before */
+  } else if (has(6)) {
+    _akm = Akm::PskSha256;
+    _pmf = true;
+  } else if (has(8)) {
+    if (_cfg.passphrase.empty()) return "WPA3 needs the Wi-Fi password itself, not a stored key";
+    if (_ap_h2e_only) return "the network accepts only WPA3 hash-to-element (SAE-H2E), which is not supported yet";
+    _akm = Akm::Sae;
+    _pmf = true;
+  } else if (has(1) || has(5) || has(11) || has(12) || has(13)) {
+    return "WPA2/WPA3-Enterprise (802.1X) is not supported yet";
+  } else {
+    return "the network's key management is not supported";
+  }
+  if (_pmf && !_ap_bip_cmac) return "the network protects management frames with a cipher other than BIP-CMAC-128";
+  _rsn_ie = rsn_ie();
+  return "";
 }
 
 /* The group key into the firmware, unless that very key is already there:
@@ -200,6 +285,16 @@ bool WifiStation::install_gtk() {
   std::memcpy(_gtk_in_fw, _gtk, 16);
   _gtk_in_fw_idx = static_cast<uint8_t>(_gtk_index);
   _gtk_in_fw_valid = true;
+  return true;
+}
+
+/* The integrity group key (PMF), once per key as for the GTK. */
+bool WifiStation::install_igtk() {
+  if (!_pmf || !_igtk_valid) return true;
+  if (_igtk_in_fw_valid && std::memcmp(_igtk_in_fw, _igtk, 16) == 0) return true;
+  if (!_dev.sta_set_igtk(_igtk_id, _igtk, _igtk_ipn)) return false;
+  std::memcpy(_igtk_in_fw, _igtk, 16);
+  _igtk_in_fw_valid = true;
   return true;
 }
 
@@ -236,7 +331,16 @@ void WifiStation::learn_beacon(const uint8_t *f, size_t len) {
   if (len < 36) return;
   _beacon_int = le16(f + 32);
   _ap_capab = le16(f + 34);
-  _ap_rsn = _ap_ht = _ap_vht = _ap_2ss = false;
+  _ap_rsn = _ap_ht = _ap_vht = _ap_2ss = _ap_wmm = false;
+  _ap_ht_cap = 0;
+  _ap_ampdu = 0;
+  _ap_vht_cap = 0;
+  _ap_vht_mcs = 0xffff;
+  _ap_pairwise_ccmp = _ap_bip_cmac = true;
+  _ap_mfpc = _ap_mfpr = _ap_h2e_only = false;
+  _ap_akms = 0;
+  _ap_rsn_caps = 0;
+  _ap_rsn_raw.clear();
   _ap_width = 20;
   _ap_rates.clear();
   for (size_t i = 36; i + 2 <= len;) {
@@ -246,29 +350,100 @@ void WifiStation::learn_beacon(const uint8_t *f, size_t len) {
     if (id == 1 || id == 50) _ap_rates.insert(_ap_rates.end(), v, v + n);
     else if (id == 5 && n >= 2) _dtim = v[1] ? v[1] : 1;
     else if (id == 48 && n >= 18) {
-      /* Group cipher and the first pairwise/AKM must be CCMP / PSK. */
+      /* RSN (9.4.2.25): version, group cipher, pairwise ciphers, AKMs,
+       * capabilities, PMKIDs, group management cipher. The group cipher
+       * must be CCMP, as before. */
+      _ap_rsn_raw.assign(v, v + std::min<size_t>(n, 64));
       const bool ccmp = std::memcmp(v + 2, kRsnOui, 3) == 0 && v[5] == 4;
       _ap_rsn = ccmp;
+      size_t o = 6;
+      const unsigned npair = le16(v + o);
+      o += 2;
+      _ap_pairwise_ccmp = false;
+      for (unsigned k = 0; k < npair && o + 4 <= n; k++, o += 4)
+        if (std::memcmp(v + o, kRsnOui, 3) == 0 && v[o + 3] == 4) _ap_pairwise_ccmp = true;
+      if (o + 2 <= n) {
+        const unsigned nakm = le16(v + o);
+        o += 2;
+        for (unsigned k = 0; k < nakm && o + 4 <= n; k++, o += 4)
+          if (std::memcmp(v + o, kRsnOui, 3) == 0 && v[o + 3] < 32) _ap_akms |= 1u << v[o + 3];
+      }
+      if (o + 2 <= n) {
+        const uint16_t caps = le16(v + o);
+        o += 2;
+        _ap_rsn_caps = caps;
+        _ap_mfpc = caps & 0x80;
+        _ap_mfpr = caps & 0x40;
+      }
+      if (o + 2 <= n) o += 2 + 16 * size_t(le16(v + o)); /* PMKIDs */
+      if (o + 4 <= n) _ap_bip_cmac = std::memcmp(v + o, kRsnOui, 3) == 0 && v[o + 3] == 6;
     } else if (id == 45 && n >= 26) {
       _ap_ht = true;
       _ap_2ss = v[4] != 0; /* MCS 8-15 supported */
+      _ap_ht_cap = le16(v);
+      _ap_ampdu = v[2];
     } else if (id == 61 && n >= 2) {
       if (v[1] & 0x03) _ap_width = 40; /* secondary channel offset */
     } else if (id == 191 && n >= 12) {
       _ap_vht = true;
+      _ap_vht_cap = static_cast<uint32_t>(le16(v)) | static_cast<uint32_t>(le16(v + 2)) << 16;
+      _ap_vht_mcs = le16(v + 4);
     } else if (id == 192 && n >= 1) {
       if (v[0] >= 1) _ap_width = 80;
+    } else if (id == 221 && n >= 6 && v[0] == 0x00 && v[1] == 0x50 && v[2] == 0xf2 && v[3] == 0x02 &&
+               (v[4] == 0x00 || v[4] == 0x01)) {
+      _ap_wmm = true;
     }
     i += 2 + n;
   }
+  for (uint8_t r : _ap_rates)
+    if (r == 0xfb) _ap_h2e_only = true; /* BSS membership selector 123: SAE hash-to-element only */
   if (!_beacon_seen) {
     _beacon_seen = true;
-    _log(std::string("station: beacon heard: ") + (_ap_rsn ? "WPA2" : (_ap_capab & 0x10) ? "protected (not WPA2-CCMP)" : "open") +
+    std::string sec = "open";
+    if (_ap_rsn) {
+      sec.clear();
+      const std::pair<unsigned, const char *> names[] = {{2, "WPA2"}, {6, "WPA2-SHA256"}, {8, "WPA3"}, {18, "OWE"},
+                                                         {1, "802.1X"}, {5, "802.1X-SHA256"}, {24, "WPA3-SAE-EXT"}};
+      for (const auto &[akm, name] : names)
+        if ((_ap_akms >> akm) & 1) sec += (sec.empty() ? "" : "/") + std::string(name);
+      if (sec.empty()) sec = "RSN";
+      if (_ap_mfpr) sec += ", PMF required";
+      else if (_ap_mfpc) sec += ", PMF capable";
+      if (_ap_h2e_only) sec += ", SAE-H2E only";
+    } else if (_ap_capab & 0x10) {
+      sec = "protected (not RSN-CCMP)";
+    }
+    _log(std::string("station: beacon heard: ") + sec +
          (_ap_ht ? ", HT" : "") + (_ap_vht ? ", VHT" : "") + ", " + std::to_string(_ap_width) + " MHz");
   }
 }
 
+/* A probe request to the AP alone (its BSSID and SSID): the answer carries
+ * what a beacon does, and a radio that hears unicast frames better than
+ * broadcasts (the MT7902 beside AWDL) gets it where beacons go unheard. */
+void WifiStation::send_probe() {
+  std::vector<uint8_t> f(24, 0);
+  f[0] = 0x40;
+  std::memcpy(&f[4], _cfg.bssid, 6);
+  std::memcpy(&f[10], _addr.data(), 6);
+  std::memcpy(&f[16], _cfg.bssid, 6);
+  f[22] = static_cast<uint8_t>(++_mgmt_seq << 4);
+  f[23] = static_cast<uint8_t>(_mgmt_seq >> 4);
+  f.push_back(0);
+  f.push_back(static_cast<uint8_t>(_cfg.ssid.size()));
+  f.insert(f.end(), _cfg.ssid.begin(), _cfg.ssid.end());
+  const uint8_t rates[10] = {1, 8, 0x8c, 0x12, 0x98, 0x24, 0xb0, 0x48, 0x60, 0x6c}; /* 6-54 Mb/s */
+  f.insert(f.end(), rates, rates + sizeof(rates));
+  _dev.sta_transmit(f.data(), f.size(), mgmt_rate(), false);
+}
+
 void WifiStation::send_auth() {
+  if (_akm == Akm::Sae) {
+    if (_sae_step == SaeStep::Confirmed) sae_send_confirm();
+    else sae_send_commit();
+    return;
+  }
   std::vector<uint8_t> f(24, 0);
   f[0] = 0xb0;
   std::memcpy(&f[4], _cfg.bssid, 6);
@@ -282,6 +457,66 @@ void WifiStation::send_auth() {
   _dev.sta_transmit(f.data(), f.size(), mgmt_rate(), false);
 }
 
+/* SAE commit (transaction 1): derived once per join, sent again as is. */
+void WifiStation::sae_send_commit() {
+  if (_sae_step == SaeStep::None) {
+    if (!_sae.prepare(_addr.data(), _cfg.bssid, _cfg.passphrase) || !_sae.commit())
+      return fail("WPA3: could not derive the SAE password element");
+    _sae_step = SaeStep::Committed;
+  }
+  std::vector<uint8_t> f = auth_frame(_cfg.bssid, _addr.data(), _mgmt_seq, 3, 1, 0);
+  const std::vector<uint8_t> body = _sae.commit_body(_sae_token);
+  f.insert(f.end(), body.begin(), body.end());
+  _dev.sta_transmit(f.data(), f.size(), mgmt_rate(), false);
+}
+
+/* SAE confirm (transaction 2): send-confirm goes up with each one sent. */
+void WifiStation::sae_send_confirm() {
+  _sae_sc++;
+  uint8_t c[32];
+  if (!_sae.confirm(_sae_sc, c)) return fail("WPA3: could not compute the SAE confirm");
+  std::vector<uint8_t> f = auth_frame(_cfg.bssid, _addr.data(), _mgmt_seq, 3, 2, 0);
+  put_le16(f, _sae_sc);
+  f.insert(f.end(), c, c + 32);
+  _dev.sta_transmit(f.data(), f.size(), mgmt_rate(), false);
+}
+
+void WifiStation::handle_sae(uint16_t seq, uint16_t status, const uint8_t *body, size_t len) {
+  if (seq == 1) {
+    if (status == 76) { /* anti-clogging token required: commit again with it */
+      if (len < 2 || ++_sae_tokens > 3) return fail("WPA3: the access point keeps asking for an anti-clogging token");
+      _sae_token.assign(body + 2, body + len);
+      _log("station: SAE anti-clogging token received; committing again");
+      _tries = 0;
+      _last_try = _now;
+      return sae_send_commit();
+    }
+    if (status == 77) return fail("WPA3: the access point wants an SAE group other than 19 (P-256)");
+    if (status == 126) return fail("WPA3: the access point requires SAE hash-to-element, which is not supported yet");
+    if (status != 0) return fail("WPA3 authentication refused, status " + std::to_string(status));
+    if (_sae_step == SaeStep::Committed) {
+      if (!_sae.process_commit(body, len)) return fail("WPA3: the access point's SAE commit is invalid");
+      _sae_step = SaeStep::Confirmed;
+      _tries = 0;
+      _last_try = _now;
+      sae_send_confirm();
+      _log("station: SAE commit exchanged, confirm sent");
+    } else if (_sae_step == SaeStep::Confirmed) {
+      sae_send_confirm(); /* the access point repeated its commit: our confirm was lost */
+    }
+  } else if (seq == 2) {
+    if (status != 0) return fail("WPA3 authentication refused at confirm, status " + std::to_string(status));
+    if (_sae_step != SaeStep::Confirmed || len < 2 + 32) return;
+    if (!_sae.verify(le16(body), body + 2)) return fail("WPA3 authentication failed: check the Wi-Fi password");
+    std::memcpy(_pmk, _sae.pmk(), 32);
+    _log("station: WPA3 (SAE) authenticated");
+    _state = State::Associating;
+    _state_since = _now;
+    _tries = 0;
+    _last_try = 0;
+  }
+}
+
 void WifiStation::send_assoc() {
   std::vector<uint8_t> f(24, 0);
   f[0] = 0x00;
@@ -290,14 +525,21 @@ void WifiStation::send_assoc() {
   std::memcpy(&f[16], _cfg.bssid, 6);
   f[22] = static_cast<uint8_t>(++_mgmt_seq << 4);
   f[23] = static_cast<uint8_t>(_mgmt_seq >> 4);
-  uint16_t cap = 0x0001 | 0x0400; /* ESS, short slot time */
-  if (_ap_capab & 0x0020) cap |= 0x0020; /* short preamble */
+  uint16_t cap = 0x0001; /* ESS */
+  if (!plain() || (_ap_capab & 0x0010)) cap |= 0x0010;      /* privacy */
+  if (_ap_capab & 0x0020) cap |= 0x0020;                    /* short preamble */
+  if (!_beacon_seen || (_ap_capab & 0x0400)) cap |= 0x0400; /* short slot time */
   put_le16(f, cap);
   put_le16(f, 10); /* listen interval */
   f.push_back(0);
   f.push_back(static_cast<uint8_t>(_cfg.ssid.size()));
   f.insert(f.end(), _cfg.ssid.begin(), _cfg.ssid.end());
-  std::vector<uint8_t> rates = _ap_rates;
+  /* Filter out BSS membership selectors (HT/VHT/HE/EHT/SAE-H2E, value > 108 = 54 Mb/s)
+   * so we never advertise HE/EHT membership without sending HE/EHT Capabilities IEs. */
+  std::vector<uint8_t> rates;
+  rates.reserve(_ap_rates.size());
+  for (uint8_t r : _ap_rates)
+    if ((r & 0x7f) <= 108) rates.push_back(r);
   if (rates.empty()) {
     if (_cfg.channel <= 14) rates = {0x82, 0x84, 0x8b, 0x96, 0x0c, 0x12, 0x18, 0x24, 0x30, 0x48, 0x60, 0x6c};
     else rates = {0x8c, 0x12, 0x98, 0x24, 0xb0, 0x48, 0x60, 0x6c};
@@ -311,7 +553,13 @@ void WifiStation::send_assoc() {
     f.push_back(static_cast<uint8_t>(rates.size() - first));
     f.insert(f.end(), rates.begin() + first, rates.end());
   }
-  if (!_cfg.open) f.insert(f.end(), _rsn_ie.begin(), _rsn_ie.end());
+  if (!plain()) f.insert(f.end(), _rsn_ie.begin(), _rsn_ie.end());
+  if (_akm == Akm::Owe) {
+    /* OWE Diffie-Hellman Parameter (extension 32): group 19, our public x. */
+    const uint8_t head[5] = {255, 1 + 2 + 32, 32, 19, 0};
+    f.insert(f.end(), head, head + 5);
+    f.insert(f.end(), _owe.public_x(), _owe.public_x() + 32);
+  }
   if (_ap_ht) {
     /* HT capabilities: 20/40 (if the AP is wide), SM PS off, short GI 20/40,
      * 1 RX STBC stream; 64 KiB A-MPDU, 8 us spacing; MCS 0-15 (two chains). */
@@ -346,10 +594,31 @@ void WifiStation::send_assoc() {
     const uint8_t vht[14] = {191, 12, 0x20, 0x01, 0x80, 0x03, 0xfa, 0xff, 0, 0, 0xfa, 0xff, 0, 0};
     f.insert(f.end(), vht, vht + sizeof(vht));
   }
+  if (_ap_wmm) {
+    /* WMM Information Element (OUI 00-50-F2, type 2, subtype 0, version 1, QoS info 0):
+     * required by 802.11n/ac when advertising HT/VHT capabilities. */
+    const uint8_t wmm[9] = {221, 7, 0x00, 0x50, 0xf2, 0x02, 0x00, 0x01, 0x00};
+    f.insert(f.end(), wmm, wmm + sizeof(wmm));
+  }
   _dev.sta_transmit(f.data(), f.size(), mgmt_rate(), false);
 }
 
-void WifiStation::handle_mgmt(const RxFrame &f) {
+void WifiStation::handle_mgmt(const RxFrame &in) {
+  RxFrame f = in;
+  std::vector<uint8_t> clear;
+  if (in.data[1] & 0x40) {
+    /* A protected management frame (PMF): the firmware decrypted it and left
+     * the CCMP header in place, as for data. Read it without. */
+    constexpr uint16_t ok = kStaRxDecDone | kStaRxMicOk;
+    if (!_pmf || (in.status & ok) != ok || in.len < 24 + 8) return;
+    const size_t end = in.len - (in.mic_stripped ? 0 : 8);
+    if (end < 24 + 8) return;
+    clear.assign(in.data, in.data + 24);
+    clear[1] &= static_cast<uint8_t>(~0x40);
+    clear.insert(clear.end(), in.data + 32, in.data + end);
+    f.data = clear.data();
+    f.len = clear.size();
+  }
   const uint8_t sub = f.data[0] & 0xf0;
   if (sub == 0x80 || sub == 0x50) { /* beacon, probe response */
     learn_beacon(f.data, f.len);
@@ -358,6 +627,7 @@ void WifiStation::handle_mgmt(const RxFrame &f) {
   if (std::memcmp(f.data + 4, _addr.data(), 6) != 0) return;
   if (sub == 0xb0 && _state == State::Authenticating && f.len >= 30) {
     const uint16_t alg = le16(f.data + 24), seq = le16(f.data + 26), status = le16(f.data + 28);
+    if (alg == 3 && _akm == Akm::Sae) return handle_sae(seq, status, f.data + 30, f.len - 30);
     if (alg == 0 && seq == 2) {
       if (status != 0) return fail("authentication refused, status " + std::to_string(status));
       _state = State::Associating;
@@ -367,7 +637,35 @@ void WifiStation::handle_mgmt(const RxFrame &f) {
     }
   } else if ((sub == 0x10 || sub == 0x30) && _state == State::Associating && f.len >= 30) {
     const uint16_t status = le16(f.data + 26), aid = le16(f.data + 28);
-    if (status != 0) return fail("association refused, status " + std::to_string(status));
+    if (status == 30) return fail("association refused for now (the access point still holds our previous connection)");
+    if (status != 0) {
+      std::string rsn_hex;
+      rsn_hex.reserve(_ap_rsn_raw.size() * 2);
+      for (uint8_t b : _ap_rsn_raw) {
+        char h[3];
+        std::snprintf(h, sizeof(h), "%02x", b);
+        rsn_hex += h;
+      }
+      char ctx[256];
+      std::snprintf(ctx, sizeof(ctx),
+                    "station: assoc context: ap_capab=0x%04x rsn_caps=0x%04x wmm=%u akm=%u pmf=%u ap_rsn=%s",
+                    _ap_capab, _ap_rsn_caps, _ap_wmm ? 1u : 0u, static_cast<unsigned>(_akm), _pmf ? 1u : 0u,
+                    rsn_hex.empty() ? "none" : rsn_hex.c_str());
+      _log(ctx);
+      return fail("association refused, status " + std::to_string(status));
+    }
+    if (_akm == Akm::Owe) {
+      /* The AP's OWE Diffie-Hellman Parameter: group 19 and its public x. */
+      const uint8_t *peer_x = nullptr;
+      for (size_t i = 30; i + 2 <= f.len;) {
+        const uint8_t id = f.data[i], n = f.data[i + 1];
+        if (i + 2 + n > f.len) break;
+        if (id == 255 && n >= 1 + 2 + 32 && f.data[i + 2] == 32 && le16(f.data + i + 3) == 19) peer_x = f.data + i + 5;
+        i += 2 + n;
+      }
+      if (!peer_x || !_owe.derive(peer_x)) return fail("Enhanced Open: the access point's key exchange is missing or invalid");
+      std::memcpy(_pmk, _owe.pmk(), 32);
+    }
     unsigned width = 20;
     if (_ap_ht && _ap_width >= 40) width = std::min(_ap_width, _cfg.max_width);
     StaParams p = _dev.sta_params();
@@ -376,10 +674,15 @@ void WifiStation::handle_mgmt(const RxFrame &f) {
     p.mimo = _ap_2ss;
     p.width = width;
     p.beacon_int = _beacon_int;
+    p.ap_ht_cap = _ap_ht_cap;
+    p.ap_ampdu = _ap_ampdu;
+    p.ap_vht_cap = _ap_vht_cap;
+    p.ap_vht_mcs = _ap_vht_mcs;
     _dev.sta_join_update(p);
     if (!_dev.sta_associated(aid, _dtim)) return fail("the firmware refused the association");
     _dev.sta_rate_control();
-    if (_cfg.open) {
+    if (_pmf && !_dev.sta_set_mfp(true)) return fail("the firmware refused management frame protection");
+    if (plain()) {
       _state = State::Running;
       _keys_installed = true;
       _tap.set_connected(true);
@@ -392,6 +695,24 @@ void WifiStation::handle_mgmt(const RxFrame &f) {
   } else if (sub == 0xc0 || sub == 0xa0) { /* deauthentication, disassociation */
     const uint16_t reason = f.len >= 26 ? le16(f.data + 24) : 0;
     if (_state != State::Failed) fail("the access point disconnected us, reason " + std::to_string(reason));
+  } else if (sub == 0xd0 && f.len >= 28 && f.data[24] == 8 && f.data[25] == 0) {
+    /* SA Query request (PMF, 9.6.9): answered, protected, with its
+     * transaction identifier, so the access point keeps our association. */
+    if (!_pmf || !_keys_installed || !(in.data[1] & 0x40)) return;
+    std::vector<uint8_t> a(28, 0);
+    a[0] = 0xd0;
+    a[1] = 0x40;
+    std::memcpy(&a[4], _cfg.bssid, 6);
+    std::memcpy(&a[10], _addr.data(), 6);
+    std::memcpy(&a[16], _cfg.bssid, 6);
+    ++_mgmt_seq;
+    a[22] = static_cast<uint8_t>(_mgmt_seq << 4);
+    a[23] = static_cast<uint8_t>(_mgmt_seq >> 4);
+    a[24] = 8; /* SA Query */
+    a[25] = 1; /* response */
+    a[26] = f.data[26];
+    a[27] = f.data[27];
+    if (_addba_answers.size() < 8) _addba_answers.push_back(std::move(a));
   } else if (sub == 0xd0 && f.len >= 30 && f.data[24] == 3 && f.data[25] == 2) {
     /* DELBA (Block Ack category, action 2): the parameter set's bit 11 says
      * whether the sender started the session, bits 12-15 the TID. The AP
@@ -432,6 +753,8 @@ void WifiStation::handle_mgmt(const RxFrame &f) {
       _ba_token_valid &= static_cast<uint8_t>(~(1u << tid));
       if (_declined_ba++ < 3) _log("station: Block Ack request on TID " + std::to_string(r.tid) + " declined");
     }
+    /* Block Ack action frames are robust: under PMF the answer goes out protected. */
+    if (_pmf && _keys_installed) a[1] |= 0x40;
     if (_addba_answers.size() < 8) _addba_answers.push_back(std::move(a));
   }
 }
@@ -469,8 +792,8 @@ void WifiStation::handle_data(const RxFrame &f) {
   const bool encrypted = (flags & 0x40) != 0;
   if (encrypted) {
     /* Protected: the firmware decrypted it, or it is dropped. */
-    if ((f.status & (IWX_RX_MPDU_RES_STATUS_DEC_DONE | IWX_RX_MPDU_RES_STATUS_MIC_OK)) !=
-        (IWX_RX_MPDU_RES_STATUS_DEC_DONE | IWX_RX_MPDU_RES_STATUS_MIC_OK)) {
+    if ((f.status & (kStaRxDecDone | kStaRxMicOk)) !=
+        (kStaRxDecDone | kStaRxMicOk)) {
       if (_rx.undecrypted++ < 5) {
         char b[96];
         std::snprintf(b, sizeof(b), "station: frame not decrypted (status 0x%04x, %zu bytes)", f.status, f.len);
@@ -485,7 +808,7 @@ void WifiStation::handle_data(const RxFrame &f) {
       if (len < 8) return;
       len -= 8;
     }
-  } else if (!_cfg.open) {
+  } else if (!plain()) {
     /* Unencrypted frames on a protected network are valid only during the
      * initial 4-way handshake before pairwise keys are installed. */
     if (_state != State::Handshake || _keys_installed) {
@@ -502,7 +825,7 @@ void WifiStation::handle_data(const RxFrame &f) {
   const bool qos = (f.data[0] & 0x88) == 0x88;
   const size_t qos_at = (flags & 0x03) == 0x03 ? 30 : 24;
   if (qos && qos_at < h && (f.data[qos_at] & 0x80)) {
-    if (!encrypted && !_cfg.open) {
+    if (!encrypted && !plain()) {
       if (_rx.not_llc++ < 5) _log("station: unencrypted A-MSDU dropped");
       return;
     }
@@ -544,7 +867,7 @@ void WifiStation::deliver(const uint8_t *da, const uint8_t *sa, const uint8_t *b
     handle_eapol(body, len, encrypted);
     return;
   }
-  if (!_cfg.open && !encrypted) return;
+  if (!plain() && !encrypted) return;
   if (_state != State::Running) return;
   std::vector<uint8_t> eth;
   eth.reserve(14 + len);
@@ -554,6 +877,7 @@ void WifiStation::deliver(const uint8_t *da, const uint8_t *sa, const uint8_t *b
   eth.insert(eth.end(), body, body + len);
   if (_tap.write(eth.data(), eth.size())) {
     _rx_packets++;
+    _rx_bytes += eth.size();
   } else if (_rx.tap_failed++ < 5) {
     _log("station: writing to the TAP adapter failed");
   }
@@ -585,6 +909,7 @@ bool WifiStation::send_data(const uint8_t *da, uint16_t ethertype, const uint8_t
   }
   if (_dev.sta_transmit(f.data(), f.size(), rate, protect) < 0) return false;
   _tx_packets++;
+  _tx_bytes += f.size();
   return true;
 }
 
@@ -595,7 +920,7 @@ void WifiStation::on_ethernet(const uint8_t *frame, size_t len) {
   if (std::memcmp(frame + 6, _addr.data(), 6) != 0) return;
   const uint16_t ethertype = be16(frame + 12);
   if (!(frame[0] & 1)) _tx_unicast++;
-  send_data(frame, ethertype, frame + 14, len - 14, _keys_installed && !_cfg.open);
+  send_data(frame, ethertype, frame + 14, len - 14, _keys_installed && !plain());
 }
 
 /* ---------------------------------------------------------------- WPA2 */
@@ -608,7 +933,8 @@ bool WifiStation::derive_ptk(const uint8_t anonce[32], uint8_t out[48]) {
   const bool a_low = std::memcmp(anonce, _snonce, 32) < 0;
   std::memcpy(data + 12, a_low ? anonce : _snonce, 32);
   std::memcpy(data + 44, a_low ? _snonce : anonce, 32);
-  return crypto::prf_sha1(_pmk, 32, "Pairwise key expansion", data, sizeof(data), out, 48);
+  if (_akm == Akm::Psk) return crypto::prf_sha1(_pmk, 32, "Pairwise key expansion", data, sizeof(data), out, 48);
+  return wpa3::kdf_sha256(_pmk, 32, "Pairwise key expansion", data, sizeof(data), out, 384);
 }
 
 /* EAPOL-Key layout (12.7.2): version, type 3, length; descriptor 2; key info
@@ -631,19 +957,49 @@ bool WifiStation::take_gtk(const std::vector<uint8_t> &plain) {
   return false;
 }
 
+/* IGTK KDE: OUI 00-0F-AC, type 9, key ID (2), IPN (6), key (16). */
+void WifiStation::take_igtk(const std::vector<uint8_t> &plain) {
+  for (size_t i = 0; i + 2 <= plain.size();) {
+    const uint8_t id = plain[i], n = plain[i + 1];
+    if (id == 0xdd && n == 0) break;
+    if (i + 2 + n > plain.size()) break;
+    if (id == 0xdd && n == 4 + 2 + 6 + 16 && std::memcmp(&plain[i + 2], kRsnOui, 3) == 0 && plain[i + 5] == 9) {
+      const unsigned key_id = le16(&plain[i + 6]);
+      if (key_id == 4 || key_id == 5) {
+        _igtk_id = key_id;
+        _igtk_ipn = le48(&plain[i + 8]);
+        std::memcpy(_igtk, &plain[i + 14], 16);
+        _igtk_valid = true;
+      }
+      return;
+    }
+    i += 2 + n;
+  }
+}
+
+/* The EAPOL-Key MIC for the AKM in use (12.7.3): HMAC-SHA1 (AKM 2),
+ * AES-CMAC (AKM 6, SAE), HMAC-SHA256 truncated (OWE, group 19). */
+bool WifiStation::compute_mic(const uint8_t *key, const uint8_t *data, size_t len, uint8_t out[16]) const {
+  if (_akm == Akm::PskSha256 || _akm == Akm::Sae) return wpa3::aes_cmac(key, data, len, out);
+  uint8_t mac[32];
+  const bool ok = _akm == Akm::Owe ? crypto::hmac_sha256(key, 16, data, len, mac) : crypto::hmac_sha1(key, 16, data, len, mac);
+  std::memcpy(out, mac, 16);
+  return ok;
+}
+
 bool WifiStation::mic_ok(const uint8_t *eapol, size_t len, const uint8_t *key) {
   if (len < 99) return false;
   std::vector<uint8_t> copy(eapol, eapol + len);
   std::memset(copy.data() + 81, 0, 16);
-  uint8_t mac[20];
-  if (!crypto::hmac_sha1(key ? key : kck(), 16, copy.data(), copy.size(), mac)) return false;
+  uint8_t mac[16];
+  if (!compute_mic(key ? key : kck(), copy.data(), copy.size(), mac)) return false;
   return std::memcmp(mac, eapol + 81, 16) == 0;
 }
 
 void WifiStation::add_mic(std::vector<uint8_t> &eapol, const uint8_t *key) {
   std::memset(eapol.data() + 81, 0, 16);
-  uint8_t mac[20];
-  crypto::hmac_sha1(key ? key : kck(), 16, eapol.data(), eapol.size(), mac);
+  uint8_t mac[16];
+  compute_mic(key ? key : kck(), eapol.data(), eapol.size(), mac);
   std::memcpy(eapol.data() + 81, mac, 16);
 }
 
@@ -652,7 +1008,7 @@ bool WifiStation::send_eapol(const std::vector<uint8_t> &eapol, bool protect) {
 }
 
 void WifiStation::handle_eapol(const uint8_t *body, size_t len, bool encrypted) {
-  if (_cfg.open || len < 99 || body[1] != 3 || body[4] != 2) return;
+  if (plain() || len < 99 || body[1] != 3 || body[4] != 2) return;
   /* Only while a handshake can be going on: a late message after a failed
    * join must not refill what fail() cleared (round 2 #8). */
   if (_state != State::Handshake && _state != State::Running) return;
@@ -663,9 +1019,8 @@ void WifiStation::handle_eapol(const uint8_t *body, size_t len, bool encrypted) 
   const size_t total = 4 + be16(body + 2);
   if (total > len || total < 99) return;
   const uint16_t info = be16(body + 5);
-  if ((info & kKeyVersionMask) != 2) {
-    _log("station: unsupported EAPOL key version " + std::to_string(info & kKeyVersionMask) +
-         " (WPA3 or PMF-SHA256 network?)");
+  if ((info & kKeyVersionMask) != key_version()) {
+    _log("station: unexpected EAPOL key version " + std::to_string(info & kKeyVersionMask) + " for " + akm_name());
     return;
   }
   const uint8_t *replay = body + 9;
@@ -732,7 +1087,7 @@ void WifiStation::handle_eapol(const uint8_t *body, size_t len, bool encrypted) 
     _ptk_ready = true;
     std::memcpy(_replay, replay, 8);
     _replay_valid = true;
-    std::vector<uint8_t> m2 = make_reply(2 | kKeyPairwise | kKeyMic, _rsn_ie);
+    std::vector<uint8_t> m2 = make_reply(key_version() | kKeyPairwise | kKeyMic, _rsn_ie);
     std::memcpy(&m2[17], _snonce, 32);
     add_mic(m2);
     const bool protect = _keys_installed;
@@ -749,7 +1104,7 @@ void WifiStation::handle_eapol(const uint8_t *body, size_t len, bool encrypted) 
        * (round 2 #1). */
       if (!mic_ok(body, total)) return;
       std::memcpy(_replay, replay, 8);
-      std::vector<uint8_t> again = make_reply(2 | kKeyPairwise | kKeyMic | kKeySecure, {});
+      std::vector<uint8_t> again = make_reply(key_version() | kKeyPairwise | kKeyMic | kKeySecure, {});
       add_mic(again);
       send_eapol(again, true);
       remember(again, true);
@@ -766,8 +1121,10 @@ void WifiStation::handle_eapol(const uint8_t *body, size_t len, bool encrypted) 
       if (!crypto::aes_unwrap(kck() + 16, 16, key_data, data_len, plain))
         return fail("could not unwrap the group key");
       if (!take_gtk(plain)) return fail("message 3/4 carries no usable group key");
+      take_igtk(plain);
+      if (_pmf && !_igtk_valid) _log("station: message 3/4 carries no integrity group key");
     }
-    std::vector<uint8_t> m4 = make_reply(2 | kKeyPairwise | kKeyMic | kKeySecure, {});
+    std::vector<uint8_t> m4 = make_reply(key_version() | kKeyPairwise | kKeyMic | kKeySecure, {});
     add_mic(m4);
     /* During a rekey message 4 goes out under the key in use. */
     const bool protect = _keys_installed;
@@ -796,8 +1153,10 @@ void WifiStation::handle_eapol(const uint8_t *body, size_t len, bool encrypted) 
     if (!(info & kKeyEncryptedData) || !crypto::aes_unwrap(_ptk + 16, 16, key_data, data_len, plain) ||
         !take_gtk(plain))
       return fail("the group key update could not be read");
+    take_igtk(plain);
     if (!install_gtk()) return fail("the firmware refused the new group key");
-    std::vector<uint8_t> g2 = make_reply(2 | kKeyMic | kKeySecure, {});
+    if (!install_igtk()) return fail("the firmware refused the new integrity group key");
+    std::vector<uint8_t> g2 = make_reply(key_version() | kKeyMic | kKeySecure, {});
     add_mic(g2, _ptk);
     send_eapol(g2, true);
     remember(g2, true);
@@ -809,6 +1168,9 @@ void WifiStation::handle_eapol(const uint8_t *body, size_t len, bool encrypted) 
 
 void WifiStation::tick(uint64_t now_us) {
   _now = now_us;
+  /* First tick after start() before _now was populated: anchor _state_since so
+   * Listening genuinely waits for a beacon instead of timing out immediately. */
+  if (_state != State::Idle && _state_since == 0) _state_since = now_us;
   /* Keys go in once message 4 has left, for the first handshake and for a
    * rekey alike (Codex review #2: rekeys used to be acknowledged and never
    * installed). */
@@ -822,6 +1184,7 @@ void WifiStation::tick(uint64_t now_us) {
     if (!_dev.sta_set_key(false, 0, _ptk + 32)) return fail("could not install the pairwise key");
     _ptk_installed = true;
     if (_gtk_len && !install_gtk()) return fail("could not install the group key");
+    if (!install_igtk()) return fail("could not install the integrity group key");
     _keys_installed = true;
     if (rekey) {
       _log("station: pairwise key renewed");
@@ -829,7 +1192,7 @@ void WifiStation::tick(uint64_t now_us) {
       _state = State::Running;
       _state_since = now_us;
       _tap.set_connected(true);
-      _log("station: connected to \"" + _cfg.ssid + "\" (WPA2)");
+      _log("station: connected to \"" + _cfg.ssid + "\" (" + akm_name() + ")");
     }
     return;
   }
@@ -841,12 +1204,23 @@ void WifiStation::tick(uint64_t now_us) {
   }
   switch (_state) {
   case State::Listening:
-    /* A beacon tells us the AP's capabilities; after 1.5 s go anyway. */
-    if (_beacon_seen || now_us - _state_since > 1500000) {
+    /* A beacon tells us the AP's capabilities (without one the association
+     * asks for neither HT nor VHT: 54 Mb/s at most), or the answer to a
+     * probe, asked every 300 ms; after 3 s go anyway. */
+    if (!_beacon_seen && _cfg.channel > 14 && now_us - _state_since > 300000 &&
+        (!_last_try || now_us - _last_try > 300000)) {
+      _last_try = now_us;
+      send_probe();
+    }
+    if (_beacon_seen || now_us - _state_since > 3000000) {
       if (!_cfg.open && _beacon_seen && !_ap_rsn && (_ap_capab & 0x10)) {
-        fail("the network is not WPA2-Personal with CCMP (WPA3/TKIP are not supported)");
+        fail("the network is not WPA2/WPA3 with CCMP (WEP and TKIP are not supported)");
         return;
       }
+      const std::string why = choose_akm();
+      if (!why.empty()) return fail(why);
+      if (_akm == Akm::Owe && !_owe.generate()) return fail("Enhanced Open: could not make a key pair");
+      if ((_akm != Akm::Psk && _akm != Akm::None) || _pmf) _log(std::string("station: joining with ") + akm_name());
       _state = State::Authenticating;
       _state_since = now_us;
       _tries = 0;
@@ -857,7 +1231,9 @@ void WifiStation::tick(uint64_t now_us) {
   case State::Associating:
     if (!_last_try || now_us - _last_try > kStepTimeoutUS) {
       if (++_tries > 6) {
-        fail(_state == State::Authenticating ? "no answer to authentication" : "no answer to association");
+        /* Say when the AP was never heard: the BSSID is likely gone (#27). */
+        fail(std::string(_state == State::Authenticating ? "no answer to authentication" : "no answer to association") +
+             (_beacon_seen ? "" : " (no beacon heard from this access point)"));
         return;
       }
       _last_try = now_us;

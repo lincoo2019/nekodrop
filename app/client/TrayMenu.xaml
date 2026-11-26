@@ -1,0 +1,89 @@
+<Window x:Class="NekoDrop.TrayMenu"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:NekoDrop"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent" ResizeMode="NoResize"
+        ShowInTaskbar="False" Topmost="True" SizeToContent="WidthAndHeight" ShowActivated="True"
+        Foreground="{DynamicResource Text}" FontFamily="{DynamicResource UiFont}" FontSize="13">
+  <Window.Resources>
+    <!-- A menu item: a 16 px glyph column and the text; Tag is the glyph -->
+    <Style x:Key="Item" TargetType="Button">
+      <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+      <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="b" CornerRadius="6" Padding="10,7" Background="{TemplateBinding Background}">
+              <DockPanel>
+                <TextBlock DockPanel.Dock="Left" Width="16" Margin="0,0,10,0" FontFamily="{DynamicResource IconFont}" FontSize="13"
+                           Text="{TemplateBinding Tag}" TextAlignment="Center" VerticalAlignment="Center" Foreground="{DynamicResource Accent}"/>
+                <ContentPresenter VerticalAlignment="Center"/>
+              </DockPanel>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="{DynamicResource Card}"/></Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="b" Property="Background" Value="{DynamicResource Card}"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="Panel" TargetType="Border">
+      <Setter Property="Background" Value="{DynamicResource MicaSolid}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource BorderStrong}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="CornerRadius" Value="10"/>
+      <Setter Property="Padding" Value="6"/>
+      <Setter Property="Margin" Value="10"/>
+      <Setter Property="Effect"><Setter.Value><DropShadowEffect BlurRadius="20" ShadowDepth="5" Opacity="0.2"/></Setter.Value></Setter>
+    </Style>
+  </Window.Resources>
+
+  <StackPanel Orientation="Horizontal">
+    <!-- Network mode, opened from its item, beside the menu -->
+    <Border x:Name="ModePanel" Style="{StaticResource Panel}" Width="204" VerticalAlignment="Center" Visibility="Collapsed" Margin="10,10,-4,10">
+      <StackPanel x:Name="ModeList"/>
+    </Border>
+
+    <Border Style="{StaticResource Panel}" Width="216">
+      <StackPanel>
+        <Button Style="{StaticResource Item}" Background="{DynamicResource Card}" Click="Open_Click">
+          <DockPanel>
+            <local:AirDropMark Width="15" Height="15" Brush="{DynamicResource Accent}" Margin="-26,0,11,0"/>
+            <TextBlock Text="{local:T tray.open}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+          </DockPanel>
+        </Button>
+        <Border Style="{StaticResource Rule}" Margin="4,5"/>
+        <Button x:Name="AllowItem" Style="{StaticResource Item}" Background="Transparent" Click="Allow_Click">
+          <TextBlock Text="{local:T tray.receive}"/>
+        </Button>
+        <Button x:Name="AutoAcceptItem" Style="{StaticResource Item}" Background="Transparent" Click="AutoAccept_Click">
+          <TextBlock Text="{local:T tray.autoAccept}"/>
+        </Button>
+        <Button x:Name="ModeItem" Style="{StaticResource Item}" Background="Transparent" Tag="&#xEB44;" Click="Mode_Click">
+          <DockPanel>
+            <TextBlock DockPanel.Dock="Right" FontFamily="{DynamicResource IconFont}" Text="&#xE76B;" FontSize="9"
+                       Foreground="{DynamicResource Text3}" VerticalAlignment="Center"/>
+            <TextBlock Text="{local:T tray.mode}"/>
+          </DockPanel>
+        </Button>
+        <Button Style="{StaticResource Item}" Background="Transparent" Tag="&#xE701;" Click="Wifi_Click">
+          <TextBlock Text="{local:T wifi.tray}"/>
+        </Button>
+        <Border Style="{StaticResource Rule}" Margin="4,5"/>
+        <Button Style="{StaticResource Item}" Background="Transparent" Tag="&#xE713;" Click="Settings_Click">
+          <TextBlock Text="{local:T tray.settings}"/>
+        </Button>
+        <Button Style="{StaticResource Item}" Background="Transparent" Tag="&#xE9D9;" Click="Report_Click">
+          <TextBlock Text="{local:T tray.report}"/>
+        </Button>
+        <Border Style="{StaticResource Rule}" Margin="4,5"/>
+        <Button Style="{StaticResource Item}" Background="Transparent" Tag="&#xE7E8;" Click="Quit_Click">
+          <TextBlock Text="{local:T tray.quit}"/>
+        </Button>
+      </StackPanel>
+    </Border>
+  </StackPanel>
+</Window>

@@ -1,0 +1,20 @@
+2026-11-20 20:12:50 ===== nekodrop service 0.1.7+abc; Windows 11 Pro 24H2 (build 26100.1, Professional); mode Concurrent, country "JP" =====
+2026-11-20 20:12:50 card: PCI\VEN_8086&DEV_7A70&SUBSYS_16928086&REV_11\3&11583659&0&A3; driver service Netwtw14, INF oem76.inf; Intel INF on record oem76.inf
+2026-11-20 20:12:57 starting: boot (concurrent mode)
+2026-11-20 20:12:57 Wi-Fi: joining "Home-5G-Secret" (WPA2-Personal, channel 36) beside AirDrop
+2026-11-20 20:12:57 taking the card from oem76.inf
+2026-11-20 20:13:02 radio: 20:13:02.631 radio: card 0x00008086:0x00007a70 subsystem 0x00001692, hw_rev 0x00000430 rf_id 0x3010d000
+2026-11-20 20:13:02 radio: 20:13:02.631 radio: Intel(R) Wi-Fi 6E AX411 160MHz (AX210 family, integrated), firmware iwlwifi-so-a0-gf4-a0-68.ucode + iwlwifi-so-a0-gf4-a0.pnvm; this card has not been tested with nekodrop
+2026-11-20 20:13:02 radio: 20:13:02.943 radio: DMA: 262144 pages locked, longest physical run 177 pages, 3720 runs of 8+ (the firmware needs about 20)
+2026-11-20 20:13:03 radio: 20:13:03.131 radio: DMA: 2105 pages in use, the rest returned
+2026-11-20 20:13:03 radio: 20:13:03.131 radio: firmware 68.01d30b0c.0: 15 LMAC, 17 UMAC, 21 paging sections
+2026-11-20 20:13:03 radio: 20:13:03.296 radio: firmware alive
+2026-11-20 20:13:03 radio: 20:13:03.302 radio: PNVM: 21000 bytes for this SKU
+2026-11-20 20:13:03 radio: 20:13:03.303 radio: init: packet 0x00000203 qid 0x00000000 idx 0 len 4
+2026-11-20 20:13:08 radio: 20:13:08.303 radio: LMAC error 0x00000071 NMI_INTERRUPT_UMAC_FATAL: blink2 0x004db12e ilink1 0x004d0f66 ilink2 0x004d0f66 data1 0x004d9cee data2 0x00000010 data3 0x00000000 hcmd 0x8009fd0d last_cmd 0x00000000
+2026-11-20 20:13:08 radio: 20:13:08.303 radio: UMAC error 0x2010070d ADVANCED_SYSASSERT: blink1 0x00000000 blink2 0x8045f3cc ilink1 0x010950fe ilink2 0x00000000 data1 0x00000005 data2 0xdeadbeef data3 0xdeadbeef cmd_header 0x00010c00
+2026-11-20 20:13:08 radio: 20:13:08.318 radio: bring-up failed: no INIT_COMPLETE from the firmware
+2026-11-20 20:13:08 start failed: the radio exited during bring-up: no INIT_COMPLETE from the firmware
+2026-11-20 20:13:09 radio: event: bss a4:b1:c2:d3:e4:f5 36 -50 wpa2-psk 486f6d652d35472d536563726574
+2026-11-20 20:13:10 the gateway 192.168.31.1 does not answer
+2026-11-20 20:13:11 file C:\Users\zhangsan\Desktop\a.jpg

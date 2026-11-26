@@ -1,0 +1,51 @@
+# Runs installer\report.ps1 with Windows PowerShell 5.1 on a clean Windows
+# machine against fixture logs, checks the bring-up checklist and that the
+# secrets in the fixture are redacted, and keeps the report as an artifact.
+name: report-test
+on:
+  workflow_dispatch:
+  push:
+    paths: ['installer/report.ps1', '.github/report-fixture/**', '.github/workflows/report-test.yml']
+permissions:
+  contents: read
+jobs:
+  report:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fixture logs
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "$env:ProgramData\nekodrop" | Out-Null
+          Copy-Item .github\report-fixture\ProgramData\* "$env:ProgramData\nekodrop\"
+      - name: Run report.ps1 (Windows PowerShell 5.1)
+        shell: powershell
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'report'
+          powershell -NoProfile -ExecutionPolicy Bypass -File installer\report.ps1 -OutDir $out -UserData "$pwd\.github\report-fixture\LocalAppData" -UserName zhangsan -NoOpen
+          if ($LASTEXITCODE) { throw "report.ps1 exited $LASTEXITCODE" }
+      - name: Check the report
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'report'
+          $md = Get-ChildItem $out -Filter 'nekodrop-report-*.md' | Select-Object -First 1
+          $txt = Get-ChildItem $out -Filter 'nekodrop-logs-*.txt' | Select-Object -First 1
+          if (-not $md -or -not $txt) { throw 'report files missing' }
+          $r = Get-Content $md.FullName -Raw
+          $all = $r + (Get-Content $txt.FullName -Raw)
+          $fail = @()
+          foreach ($want in '## Bring-up', '| Identify the card | ok |', '| Firmware alive | ok |', '| PNVM (AX210 family) | ok |', '| Firmware init (INIT_COMPLETE) | FAIL |', 'UMAC error 0x2010070d', '## Discovery timeline', '## Network') {
+            if (-not $r.Contains($want)) { $fail += "missing: $want" }
+          }
+          foreach ($secret in 'Home-5G-Secret', 'a4:b1:c2:d3:e4:f5', '486f6d652d35472d536563726574', '192.168.31.1', 'zhangsan', 'fe80::1c2b', $env:COMPUTERNAME) {
+            if ($all.Contains($secret)) { $fail += "not redacted: $secret" }
+          }
+          if ($r -match '(?m)^- : $') { $fail += 'empty Bluetooth line' }
+          Get-Content $md.FullName | Select-Object -First 60
+          if ($fail) { $fail | ForEach-Object { Write-Error $_ }; exit 1 }
+          'report checks passed'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: report
+          path: ${{ runner.temp }}/report

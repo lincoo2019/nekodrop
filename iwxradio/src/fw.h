@@ -26,15 +26,19 @@ struct Firmware {
   uint32_t phy_config = 0;
   uint32_t calib_event_trigger = 0, calib_flow_trigger = 0;
   uint8_t ucode_api[16] = {};  /* bit per IWX_UCODE_TLV_API_* */
-  uint8_t capa[16] = {};       /* bit per IWX_UCODE_TLV_CAPA_* */
+  uint8_t capa[24] = {};       /* bit per IWX_UCODE_TLV_CAPA_* (API 100 uses bit 128) */
   std::vector<FwCmdVersion> cmd_versions;
-  /* AX210 family: the image loader the card runs before the firmware. */
+  /* AX210/Bz families: the image loader the card runs before the firmware, and
+   * optional embedded PNVM data (TLV 74, present in BE200 API 100). */
   const uint8_t *iml = nullptr;
   size_t iml_len = 0;
+  const uint8_t *pnvm = nullptr;
+  size_t pnvm_len = 0;
 
   bool load(const std::string &path, std::string &error);
   bool has_api(unsigned bit) const;
   bool has_capa(unsigned bit) const;
   /* IWX_FW_CMD_VER_UNKNOWN (99) when the firmware does not say. */
   uint8_t cmd_version(uint8_t group, uint8_t cmd) const;
+  uint8_t notif_version(uint8_t group, uint8_t cmd) const;
 };

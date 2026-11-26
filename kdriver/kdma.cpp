@@ -44,5 +44,12 @@ DmaBuf DmaPool::alloc_page() { return alloc(kPageBytes, kPageBytes); }
 void DmaPool::trim() {}
 size_t DmaPool::longest_run() const { return 0; }
 size_t DmaPool::runs_of(size_t) const { return 0; }
+/* Kernel buffers are physically contiguous already: nothing to grow or check. */
+bool DmaPool::grow(size_t, std::string &error) {
+  error = "the kernel pool does not grow";
+  return false;
+}
+bool DmaPool::fits(std::vector<size_t>) const { return true; }
+uint64_t DmaPool::available_bytes() { return 0; }
 
 bool enable_lock_memory_privilege() { return true; }

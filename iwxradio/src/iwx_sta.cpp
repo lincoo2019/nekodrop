@@ -24,6 +24,7 @@ namespace {
 constexpr unsigned kStaMac = 1;
 constexpr unsigned kStaPhy = 1;
 constexpr unsigned kStaBinding = 1;
+constexpr unsigned kStaLink = 1;
 
 /* EDCA defaults for a station (802.11-2016 table 9-137), per firmware AC. */
 struct Edca {
@@ -76,7 +77,168 @@ int IwxDevice::sta_mac_cmd(uint32_t action, bool assoc) {
   return send_cmd(IWX_MAC_CONTEXT_CMD, &cmd, sizeof(cmd), false, nullptr);
 }
 
+int IwxDevice::mld_sta_mac_cmd(uint32_t action, bool assoc) {
+  iwx_mac_config_cmd cmd{};
+  cmd.id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(kStaMac, 0));
+  cmd.action = htole32(action);
+  if (action == IWX_FW_CTXT_ACTION_REMOVE)
+    return send_cmd(IWX_WIDE_ID(IWX_MAC_CONF_GROUP, IWX_MAC_CONFIG_CMD), &cmd, sizeof(cmd), false, nullptr);
+  cmd.mac_type = htole32(IWX_FW_MAC_TYPE_BSS_STA);
+  std::memcpy(cmd.local_mld_addr, _sta.addr, 6);
+  cmd.filter_flags = htole32(IWX_MAC_CFG_FILTER_ACCEPT_GRP | (assoc ? 0u : IWX_MAC_CFG_FILTER_ACCEPT_BEACON));
+  if (assoc) {
+    cmd.client.is_assoc = 1;
+    cmd.client.assoc_id = htole16(_sta_aid);
+  }
+  return send_cmd(IWX_WIDE_ID(IWX_MAC_CONF_GROUP, IWX_MAC_CONFIG_CMD), &cmd, sizeof(cmd), false, nullptr);
+}
+
+int IwxDevice::mld_sta_link_add() {
+  iwx_link_config_cmd cmd{};
+  cmd.action = htole32(IWX_FW_CTXT_ACTION_ADD);
+  cmd.link_id = htole32(kStaLink);
+  cmd.mac_id = htole32(kStaMac);
+  cmd.phy_id = htole32(IWX_FW_CTXT_INVALID);
+  std::memcpy(cmd.local_link_addr, _sta.addr, 6);
+  cmd.spec_link_id = 0;
+  return send_cmd(IWX_WIDE_ID(IWX_MAC_CONF_GROUP, IWX_LINK_CONFIG_CMD), &cmd, sizeof(cmd), false, nullptr);
+}
+
+int IwxDevice::mld_sta_link_modify(bool active, uint32_t modify_mask) {
+  iwx_link_config_cmd cmd{};
+  cmd.action = htole32(IWX_FW_CTXT_ACTION_MODIFY);
+  cmd.link_id = htole32(kStaLink);
+  cmd.mac_id = htole32(kStaMac);
+  cmd.phy_id = htole32(kStaPhy);
+  std::memcpy(cmd.local_link_addr, _sta.addr, 6);
+  cmd.modify_mask = htole32(modify_mask);
+  cmd.active = htole32(active ? 1u : 0u);
+  cmd.cck_rates = htole32(_sta.channel <= 14 ? 0x0fu : 0u);
+  cmd.ofdm_rates = htole32(0x15u); /* 6, 12, 24: the mandatory set */
+  cmd.short_slot = htole32(_sta.channel > 14 ? 1u : 0u);
+  for (unsigned ac = 0; ac < IWX_AC_NUM; ac++) {
+    cmd.ac[ac].cw_min = htole16(kEdca[ac].cw_min);
+    cmd.ac[ac].cw_max = htole16(kEdca[ac].cw_max);
+    cmd.ac[ac].aifsn = kEdca[ac].aifsn;
+    cmd.ac[ac].fifos_mask = static_cast<uint8_t>(1u << kEdca[ac].fifo);
+    cmd.ac[ac].edca_txop = htole16(static_cast<uint16_t>(kEdca[ac].txop_32us * 32));
+  }
+  cmd.qos_flags = htole32(IWX_MAC_QOS_FLG_UPDATE_EDCA | (_sta.ht ? IWX_MAC_QOS_FLG_TGN : 0u));
+  const uint32_t bi = _sta.beacon_int ? _sta.beacon_int : 100;
+  cmd.bi = htole32(bi);
+  cmd.dtim_interval = htole32(bi * (_sta_dtim ? _sta_dtim : 1));
+  cmd.spec_link_id = 0;
+  return send_cmd(IWX_WIDE_ID(IWX_MAC_CONF_GROUP, IWX_LINK_CONFIG_CMD), &cmd, sizeof(cmd), false, nullptr);
+}
+
+int IwxDevice::mld_sta_link_remove() {
+  iwx_link_config_cmd cmd{};
+  cmd.action = htole32(IWX_FW_CTXT_ACTION_REMOVE);
+  cmd.link_id = htole32(kStaLink);
+  cmd.phy_id = htole32(IWX_FW_CTXT_INVALID);
+  cmd.spec_link_id = 0;
+  return send_cmd(IWX_WIDE_ID(IWX_MAC_CONF_GROUP, IWX_LINK_CONFIG_CMD), &cmd, sizeof(cmd), false, nullptr);
+}
+
+int IwxDevice::mld_sta_cfg_ap(bool assoc) {
+  iwx_sta_cfg_cmd_v2 cmd{};
+  cmd.sta_id = htole32(IWX_STATION_ID);
+  cmd.link_id = htole32(kStaLink);
+  std::memcpy(cmd.peer_mld_address, _sta.bssid, 6);
+  std::memcpy(cmd.peer_link_address, _sta.bssid, 6);
+  cmd.station_type = htole32(IWX_STATION_TYPE_PEER);
+  if (assoc) cmd.assoc_id = htole32(_sta_aid);
+  /* Linux iwl_mvm_mld_cfg_sta: set mfp before authorization when the firmware
+   * advertises STA_EXP_MFP_SUPPORT, or whenever PMF is enabled. */
+  if (_sta_mfp || (!assoc && _fw.has_capa(IWX_UCODE_TLV_CAPA_STA_EXP_MFP_SUPPORT)))
+    cmd.mfp = htole32(1);
+  if (assoc && (_sta.ht || _sta.vht)) {
+    cmd.mimo = htole32(_sta.mimo ? 1u : 0u);
+    cmd.tx_ampdu_max_size = htole32(3u); /* 64 KiB (exponent 3) */
+    cmd.tx_ampdu_spacing = htole32(6u);  /* 8 us (density 6) */
+  }
+  const uint8_t ver = cmd_version(IWX_MAC_CONF_GROUP, IWX_STA_CONFIG_CMD);
+  const size_t sz =
+      (ver != IWX_FW_CMD_VER_UNKNOWN && ver > 1) ? sizeof(iwx_sta_cfg_cmd_v2) : sizeof(iwx_sta_cfg_cmd_v1);
+  return send_cmd(IWX_WIDE_ID(IWX_MAC_CONF_GROUP, IWX_STA_CONFIG_CMD), &cmd, sz, false, nullptr);
+}
+
+int IwxDevice::mld_sec_key_remove(uint32_t key_id, uint32_t key_flags) {
+  iwx_sec_key_cmd cmd{};
+  cmd.action = htole32(IWX_FW_CTXT_ACTION_REMOVE);
+  cmd.u.remove.sta_mask = htole32(1u << IWX_STATION_ID);
+  cmd.u.remove.key_id = htole32(key_id);
+  cmd.u.remove.key_flags = htole32(key_flags);
+  return send_cmd(IWX_WIDE_ID(IWX_DATA_PATH_GROUP, IWX_SEC_KEY_CMD), &cmd, sizeof(cmd), false, nullptr);
+}
+
 bool IwxDevice::sta_join(const StaParams &p) {
+  if (use_mld()) {
+    if (!_queue_enabled) return false; /* the listener comes first */
+    sta_leave();
+    _sta = p;
+    _sta_shared_binding = false;
+    if (!nic_lock()) return false;
+    int err = phy_cmd(kStaPhy, p.channel, 20, IWX_FW_CTXT_ACTION_ADD);
+    if (err) _log("station: MLD PHY context refused (" + std::to_string(err) + ")");
+    else _sta_phy_added = true;
+    if (!err) {
+      err = mld_sta_mac_cmd(IWX_FW_CTXT_ACTION_ADD, false);
+      if (err) _log("station: MLD MAC config refused (" + std::to_string(err) + ")");
+      else _sta_mac_added = true;
+    }
+    if (!err) {
+      err = mld_sta_link_add();
+      if (err) _log("station: MLD link add refused (" + std::to_string(err) + ")");
+      else _sta_link_added = true;
+    }
+    if (!err) {
+      /* Bind link 1 to PHY 1 while inactive, then activate with rates + EDCA. */
+      err = mld_sta_link_modify(false, 0);
+      if (err) _log("station: MLD link PHY bind refused (" + std::to_string(err) + ")");
+    }
+    if (!err) {
+      err = mld_sta_link_modify(true, IWX_LINK_CONTEXT_MODIFY_ACTIVE |
+                                          IWX_LINK_CONTEXT_MODIFY_RATES_INFO |
+                                          IWX_LINK_CONTEXT_MODIFY_QOS_PARAMS);
+      if (err) _log("station: MLD link activate refused (" + std::to_string(err) + ")");
+      else _sta_link_active = true;
+    }
+    if (!err) {
+      err = mld_sta_cfg_ap(false);
+      if (err) _log("station: MLD access point station refused (" + std::to_string(err) + ")");
+      else _sta_sta_added = true;
+    }
+    if (!err) {
+      err = enable_queue(_staq, IWX_STATION_ID, IWX_MGMT_TID);
+      if (err) _log("station: MLD queue refused (" + std::to_string(err) + ")");
+      else _sta_queue_enabled = true;
+    }
+    if (!err && _fw.has_capa(IWX_UCODE_TLV_CAPA_SESSION_PROT_CMD)) {
+      const uint8_t sp_ver = cmd_version(IWX_MAC_CONF_GROUP, IWX_SESSION_PROTECTION_CMD);
+      iwx_session_prot_cmd sp{};
+      sp.id_and_color = htole32((sp_ver != IWX_FW_CMD_VER_UNKNOWN && sp_ver >= 2)
+                                    ? kStaLink
+                                    : IWX_FW_CMD_ID_AND_COLOR(kStaMac, 0));
+      sp.action = htole32(IWX_FW_CTXT_ACTION_ADD);
+      sp.conf_id = htole32(IWX_SESSION_PROTECT_CONF_ASSOC);
+      sp.duration_tu = htole32(900);
+      const int e = send_cmd(iwx_cmd_id(IWX_SESSION_PROTECTION_CMD, IWX_MAC_CONF_GROUP, 0), &sp,
+                             sizeof(sp), false, nullptr);
+      if (e) _log("station: MLD session protection refused (" + std::to_string(e) + "), joining anyway");
+      else _sta_session_prot = true;
+    }
+    nic_unlock();
+    if (err) {
+      sta_leave();
+      return false;
+    }
+    char b[96];
+    plat_snprintf(b, sizeof(b), "station: joining %02x:%02x:%02x:%02x:%02x:%02x on channel %u (MLD)",
+                  p.bssid[0], p.bssid[1], p.bssid[2], p.bssid[3], p.bssid[4], p.bssid[5], p.channel);
+    _log(b);
+    return true;
+  }
   if (!_queue_enabled) return false; /* the listener comes first */
   sta_leave();
   _sta = p;
@@ -151,6 +313,7 @@ bool IwxDevice::sta_join(const StaParams &p) {
     const int e = send_cmd(iwx_cmd_id(IWX_SESSION_PROTECTION_CMD, IWX_MAC_CONF_GROUP, 0), &sp,
                            sizeof(sp), false, nullptr);
     if (e) _log("station: session protection refused (" + std::to_string(e) + "), joining anyway");
+    else _sta_session_prot = true;
   }
   nic_unlock();
   if (err) {
@@ -169,6 +332,37 @@ bool IwxDevice::sta_associated(uint16_t aid, uint8_t dtim_period) {
   if (!_sta_mac_added) return false;
   _sta_aid = aid & 0x3fff;
   _sta_dtim = dtim_period ? dtim_period : 1;
+  if (use_mld()) {
+    if (!nic_lock()) return false;
+    int err = 0;
+    if (_sta.width > 20) {
+      err = phy_cmd(kStaPhy, _sta.channel, _sta.width, IWX_FW_CTXT_ACTION_MODIFY);
+      if (err) {
+        _log("station: MLD wide PHY refused, staying at 20 MHz");
+        _sta.width = 20;
+        err = 0;
+      }
+    }
+    if (!err)
+      err = mld_sta_link_modify(true, IWX_LINK_CONTEXT_MODIFY_RATES_INFO |
+                                          IWX_LINK_CONTEXT_MODIFY_QOS_PARAMS);
+    if (!err) err = mld_sta_mac_cmd(IWX_FW_CTXT_ACTION_MODIFY, true);
+    if (!err) err = mld_sta_cfg_ap(true);
+    if (!err) {
+      iwx_mac_power_cmd pm{};
+      pm.id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(kStaMac, 0));
+      pm.keep_alive_seconds = htole16(25);
+      send_cmd(IWX_MAC_PM_POWER_TABLE, &pm, sizeof(pm), false, nullptr);
+    }
+    nic_unlock();
+    if (err) {
+      _log("station: MLD association update refused (" + std::to_string(err) + ")");
+      return false;
+    }
+    _sta_assoc = true;
+    _log("station: associated, AID " + std::to_string(_sta_aid));
+    return true;
+  }
   if (!nic_lock()) return false;
   int err = 0;
   if (!_sta_shared_binding && _sta.width > 20) {
@@ -221,6 +415,40 @@ bool IwxDevice::sta_associated(uint16_t aid, uint8_t dtim_period) {
 
 bool IwxDevice::sta_set_key(bool group, unsigned key_index, const uint8_t key[16]) {
   if (!_sta_sta_added) return false;
+  if (use_mld()) {
+    const uint8_t ver = cmd_version(IWX_DATA_PATH_GROUP, IWX_SEC_KEY_CMD);
+    if (ver == IWX_FW_CMD_VER_UNKNOWN || ver < 1) {
+      _log("station: SEC_KEY_CMD not advertised by firmware");
+      return false;
+    }
+    uint32_t flags = IWX_SEC_KEY_FLAG_CIPHER_CCMP;
+    if (group) flags |= IWX_SEC_KEY_FLAG_MCAST_KEY;
+    else if (_sta_mfp) flags |= IWX_SEC_KEY_FLAG_MFP;
+    iwx_sec_key_cmd cmd{};
+    cmd.action = htole32(IWX_FW_CTXT_ACTION_ADD);
+    cmd.u.add.sta_mask = htole32(1u << IWX_STATION_ID);
+    cmd.u.add.key_id = htole32(key_index);
+    cmd.u.add.key_flags = htole32(flags);
+    std::memcpy(cmd.u.add.key, key, 16);
+    if (!nic_lock()) return false;
+    if (!group && _sta_ptk_flags) {
+      mld_sec_key_remove(key_index, _sta_ptk_flags);
+      _sta_ptk_flags = 0;
+    } else if (group && key_index < 4 && ((_sta_gtk_mask >> key_index) & 1)) {
+      mld_sec_key_remove(key_index, flags);
+      _sta_gtk_mask &= static_cast<uint8_t>(~(1u << key_index));
+    }
+    const int err =
+        send_cmd(IWX_WIDE_ID(IWX_DATA_PATH_GROUP, IWX_SEC_KEY_CMD), &cmd, sizeof(cmd), false, nullptr);
+    nic_unlock();
+    if (err) {
+      _log("station: MLD key install refused (" + std::to_string(err) + ")");
+      return false;
+    }
+    if (!group) _sta_ptk_flags = flags;
+    else if (key_index < 4) _sta_gtk_mask |= static_cast<uint8_t>(1u << key_index);
+    return true;
+  }
   iwx_add_sta_key_cmd cmd{};
   cmd.common.key_flags = htole16(static_cast<uint16_t>(
       IWX_STA_KEY_FLG_CCM | IWX_STA_KEY_FLG_WEP_KEY_MAP |
@@ -254,6 +482,20 @@ bool IwxDevice::sta_set_key(bool group, unsigned key_index, const uint8_t key[16
 
 bool IwxDevice::sta_set_mfp(bool on) {
   if (!_sta_sta_added) return false;
+  if (use_mld()) {
+    const bool prev = _sta_mfp;
+    _sta_mfp = on;
+    if (!nic_lock()) {
+      _sta_mfp = prev;
+      return false;
+    }
+    const int err = mld_sta_cfg_ap(_sta_assoc);
+    nic_unlock();
+    if (err) _sta_mfp = prev;
+    _log(!err ? std::string("station: management frame protection ") + (on ? "on" : "off")
+              : "station: MLD management frame protection refused (" + std::to_string(err) + ")");
+    return err == 0;
+  }
   constexpr uint32_t kMfpEn = 1u << 9; /* STA_FLG_MFP_EN (iwlwifi) */
   iwx_add_sta_cmd cmd{};
   cmd.sta_id = IWX_STATION_ID;
@@ -285,6 +527,36 @@ struct IgtkCmdV2 {
 
 bool IwxDevice::sta_set_igtk(unsigned key_id, const uint8_t key[16], uint64_t rsc) {
   if (!_sta_sta_added || (key_id != 4 && key_id != 5)) return false;
+  if (use_mld()) {
+    const uint8_t ver = cmd_version(IWX_DATA_PATH_GROUP, IWX_SEC_KEY_CMD);
+    if (ver == IWX_FW_CMD_VER_UNKNOWN || ver < 1) {
+      _log("station: SEC_KEY_CMD not advertised by firmware");
+      return false;
+    }
+    const uint32_t flags =
+        IWX_SEC_KEY_FLAG_CIPHER_CCMP | IWX_SEC_KEY_FLAG_MCAST_KEY | IWX_SEC_KEY_FLAG_MFP;
+    iwx_sec_key_cmd cmd{};
+    cmd.action = htole32(IWX_FW_CTXT_ACTION_ADD);
+    cmd.u.add.sta_mask = htole32(1u << IWX_STATION_ID);
+    cmd.u.add.key_id = htole32(key_id);
+    cmd.u.add.key_flags = htole32(flags);
+    std::memcpy(cmd.u.add.key, key, 16);
+    cmd.u.add.rx_seq = htole64(rsc);
+    if (!nic_lock()) return false;
+    if (_sta_igtk_id) {
+      mld_sec_key_remove(_sta_igtk_id, flags);
+      _sta_igtk_id = 0;
+    }
+    const int err =
+        send_cmd(IWX_WIDE_ID(IWX_DATA_PATH_GROUP, IWX_SEC_KEY_CMD), &cmd, sizeof(cmd), false, nullptr);
+    nic_unlock();
+    if (err) {
+      _log("station: MLD integrity group key refused (" + std::to_string(err) + ")");
+      return false;
+    }
+    _sta_igtk_id = static_cast<uint8_t>(key_id);
+    return true;
+  }
   IgtkCmdV2 cmd{};
   cmd.ctrl_flags = htole32(IWX_STA_KEY_FLG_CMAC);
   std::memcpy(cmd.igtk, key, 16);
@@ -301,6 +573,31 @@ bool IwxDevice::sta_set_igtk(unsigned key_id, const uint8_t key[16], uint64_t rs
 /* A Block Ack session the AP ended (DELBA), or one about to be replaced. */
 bool IwxDevice::sta_remove_rx_ba(unsigned tid) {
   if (!_sta_sta_added || tid >= 8 || !((_sta_ba_tids >> tid) & 1)) return true;
+  if (use_mld()) {
+    const uint8_t ver = cmd_version(IWX_DATA_PATH_GROUP, IWX_RX_BAID_ALLOCATION_CONFIG_CMD);
+    iwx_rx_baid_cfg_cmd cmd{};
+    cmd.action = htole32(IWX_RX_BAID_ACTION_REMOVE);
+    if (ver == 1) {
+      cmd.remove_v1.baid = htole32(_sta_baid[tid]);
+    } else {
+      cmd.remove.sta_id_mask = htole32(1u << IWX_STATION_ID);
+      cmd.remove.tid = htole32(tid);
+    }
+    uint32_t baid = 0;
+    if (!nic_lock()) return false;
+    const int err = send_cmd_status(IWX_WIDE_ID(IWX_DATA_PATH_GROUP, IWX_RX_BAID_ALLOCATION_CONFIG_CMD),
+                                    &cmd, sizeof(cmd), &baid);
+    nic_unlock();
+    if (!err) {
+      /* Buffered frames go up before the BAID can be reused. */
+      _reorder.close(_sta_baid[tid]);
+      _sta_ba_tids &= static_cast<uint8_t>(~(1u << tid));
+      _sta_baid[tid] = 0xff;
+    } else {
+      _log("station: MLD removing Block Ack on TID " + std::to_string(tid) + " failed");
+    }
+    return err == 0;
+  }
   iwx_add_sta_cmd cmd{};
   cmd.sta_id = IWX_STATION_ID;
   cmd.mac_id_n_color = htole32(IWX_FW_CMD_ID_AND_COLOR(kStaMac, 0));
@@ -328,6 +625,30 @@ bool IwxDevice::sta_add_rx_ba(unsigned tid, uint16_t ssn, uint16_t window) {
    * (hardware, 2026-11-17: no internet after a while, "connected", every
    * counter clean). Replace it, as the AWDL side does. */
   if ((_sta_ba_tids >> tid) & 1) sta_remove_rx_ba(tid);
+  if (use_mld()) {
+    const uint8_t ver = cmd_version(IWX_DATA_PATH_GROUP, IWX_RX_BAID_ALLOCATION_CONFIG_CMD);
+    if (ver == IWX_FW_CMD_VER_UNKNOWN || ver < 1) return false;
+    iwx_rx_baid_cfg_cmd cmd{};
+    cmd.action = htole32(IWX_RX_BAID_ACTION_ADD);
+    cmd.alloc.sta_id_mask = htole32(1u << IWX_STATION_ID);
+    cmd.alloc.tid = static_cast<uint8_t>(tid);
+    cmd.alloc.ssn = htole16(ssn);
+    cmd.alloc.win_size = htole16(window);
+    uint32_t baid = 0xffffffffu;
+    if (!nic_lock()) return false;
+    const int err = send_cmd_status(IWX_WIDE_ID(IWX_DATA_PATH_GROUP, IWX_RX_BAID_ALLOCATION_CONFIG_CMD),
+                                    &cmd, sizeof(cmd), &baid);
+    nic_unlock();
+    if (err || baid >= IWX_MAX_BAID) return false;
+    _sta_ba_tids |= static_cast<uint8_t>(1u << tid);
+    _sta_baid[tid] = static_cast<uint8_t>(baid);
+    /* The firmware reorders by BAID/NSSN; the host does the same (Linux
+     * iwl_mvm_reorder) so the frames it releases come up in order. */
+    _reorder.open(baid, ssn, window);
+    _log("station: Block Ack open (BAID " + std::to_string(baid) + "), tid " + std::to_string(tid) +
+         ", window " + std::to_string(window));
+    return true;
+  }
   iwx_add_sta_cmd cmd{};
   cmd.sta_id = IWX_STATION_ID;
   cmd.mac_id_n_color = htole32(IWX_FW_CMD_ID_AND_COLOR(kStaMac, 0));
@@ -377,6 +698,11 @@ bool IwxDevice::sta_rate_control() {
   }
   const uint32_t id = iwx_cmd_id(IWX_TLC_MNG_CONFIG_CMD, IWX_DATA_PATH_GROUP, 0);
   const uint8_t ver = cmd_version(IWX_DATA_PATH_GROUP, IWX_TLC_MNG_CONFIG_CMD);
+  if (use_mld() && ver != 4) {
+    _sta_tlc = false;
+    _log("station: MLD TLC_MNG_CONFIG_CMD version " + std::to_string(ver) + " not supported, fixed rates");
+    return false;
+  }
   if (!nic_lock()) return false;
   int err;
   if (ver == 4) {
@@ -402,14 +728,127 @@ bool IwxDevice::sta_rate_control() {
 }
 
 void IwxDevice::sta_leave() {
-  if (!_sta_phy_added && !_sta_mac_added && !_sta_binding_added && !_sta_sta_added) return;
+  if (!_sta_phy_added && !_sta_mac_added && !_sta_binding_added && !_sta_link_added && !_sta_sta_added) return;
+  if (use_mld()) {
+    if (!_fw_error && nic_lock()) {
+      /* MLD teardown order (Linux mvm/mld-mac80211.c + mld-sta.c + link.c):
+       * session protection, RX BAIDs, TX flush, SCD queue remove, keys,
+       * STA remove, link deactivate, link remove, MAC remove, PHY remove. */
+      if (_sta_session_prot && _sta_link_active && !_fw_error) {
+        const uint8_t sp_ver = cmd_version(IWX_MAC_CONF_GROUP, IWX_SESSION_PROTECTION_CMD);
+        iwx_session_prot_cmd sp{};
+        sp.id_and_color = htole32((sp_ver != IWX_FW_CMD_VER_UNKNOWN && sp_ver >= 2)
+                                      ? kStaLink
+                                      : IWX_FW_CMD_ID_AND_COLOR(kStaMac, 0));
+        sp.action = htole32(IWX_FW_CTXT_ACTION_REMOVE);
+        sp.conf_id = htole32(IWX_SESSION_PROTECT_CONF_ASSOC);
+        if (const int e = send_cmd(iwx_cmd_id(IWX_SESSION_PROTECTION_CMD, IWX_MAC_CONF_GROUP, 0), &sp, sizeof(sp),
+                                   false, nullptr))
+          _log("station: MLD could not cancel session protection (" + std::to_string(e) + ")");
+      }
+      if (_sta_sta_added && _sta_ba_tids && !_fw_error) {
+        const uint8_t ver = cmd_version(IWX_DATA_PATH_GROUP, IWX_RX_BAID_ALLOCATION_CONFIG_CMD);
+        for (unsigned tid = 0; tid < 8 && !_fw_error; tid++) {
+          if (!((_sta_ba_tids >> tid) & 1)) continue;
+          iwx_rx_baid_cfg_cmd cmd{};
+          cmd.action = htole32(IWX_RX_BAID_ACTION_REMOVE);
+          if (ver == 1) cmd.remove_v1.baid = htole32(_sta_baid[tid]);
+          else {
+            cmd.remove.sta_id_mask = htole32(1u << IWX_STATION_ID);
+            cmd.remove.tid = htole32(tid);
+          }
+          uint32_t baid = 0;
+          send_cmd_status(IWX_WIDE_ID(IWX_DATA_PATH_GROUP, IWX_RX_BAID_ALLOCATION_CONFIG_CMD),
+                          &cmd, sizeof(cmd), &baid);
+        }
+      }
+      /* Buffered frames go up before the firmware can reuse these BAIDs. */
+      for (unsigned tid = 0; tid < 8; tid++)
+        if ((_sta_ba_tids >> tid) & 1) _reorder.close(_sta_baid[tid]);
+      if (_sta_sta_added && !_fw_error) {
+        iwx_tx_path_flush_cmd f{};
+        f.sta_id = htole32(IWX_STATION_ID);
+        f.tid_mask = htole16(0xffff);
+        if (const int e = send_cmd(IWX_TXPATH_FLUSH, &f, sizeof(f), false, nullptr))
+          _log("station: MLD could not flush before removing it (" + std::to_string(e) + ")");
+      }
+      if (_sta_queue_enabled && !_fw_error) {
+        if (const int e = disable_queue(IWX_STATION_ID, IWX_MGMT_TID))
+          _log("station: MLD could not disable queue (" + std::to_string(e) + ")");
+      }
+      if (_sta_sta_added && !_fw_error) {
+        if (_sta_ptk_flags) mld_sec_key_remove(0, _sta_ptk_flags);
+        for (unsigned i = 0; i < 4 && !_fw_error; i++) {
+          if ((_sta_gtk_mask >> i) & 1)
+            mld_sec_key_remove(i, IWX_SEC_KEY_FLAG_CIPHER_CCMP | IWX_SEC_KEY_FLAG_MCAST_KEY);
+        }
+        if (_sta_igtk_id && !_fw_error)
+          mld_sec_key_remove(_sta_igtk_id,
+                             IWX_SEC_KEY_FLAG_CIPHER_CCMP | IWX_SEC_KEY_FLAG_MCAST_KEY | IWX_SEC_KEY_FLAG_MFP);
+      }
+      if (_sta_sta_added && !_fw_error) {
+        iwx_remove_sta_cmd rm{};
+        rm.sta_id = htole32(IWX_STATION_ID);
+        send_cmd(IWX_WIDE_ID(IWX_MAC_CONF_GROUP, IWX_STA_REMOVE_CMD), &rm, sizeof(rm), false, nullptr);
+      }
+      if (_sta_link_active && !_fw_error)
+        mld_sta_link_modify(false, IWX_LINK_CONTEXT_MODIFY_ACTIVE);
+      if (_sta_link_added && !_fw_error) mld_sta_link_remove();
+      if (_sta_mac_added && !_fw_error) mld_sta_mac_cmd(IWX_FW_CTXT_ACTION_REMOVE, false);
+      if (_sta_phy_added && !_fw_error) phy_cmd(kStaPhy, _sta.channel, 20, IWX_FW_CTXT_ACTION_REMOVE);
+      nic_unlock();
+    }
+    _sta_phy_added = _sta_mac_added = _sta_binding_added = _sta_link_added = _sta_link_active = false;
+    _sta_sta_added = _sta_queue_enabled = _sta_assoc = _sta_tlc = _sta_session_prot = _sta_mfp = false;
+    _sta_ba_tids = _sta_gtk_mask = _sta_igtk_id = 0;
+    _sta_ptk_flags = 0;
+    std::memset(_sta_baid, 0xff, sizeof(_sta_baid));
+    _staq.queued = 0;
+    return;
+  }
   if (!_fw_error && nic_lock()) {
     /* iwlwifi's teardown order: queue, station, quota, binding, MAC, PHY.
      * A station removed with its queue still enabled, or a time quota naming
      * a binding that is gone, asserts the firmware at the next join. */
     /* The TVQM queue needs no command: the firmware frees a removed
      * station's queues (iwl_mvm_disable_txq with the new TX API). */
-    if (_sta_sta_added) {
+    /* OpenBSD/itlwm's iwx_deauth starts by cancelling the session protection
+     * and flushing the station (iwx_flush_sta: drain on, TXPATH_FLUSH of all
+     * TIDs, drain off) before REMOVE_STA. Skipping both, a join whose access
+     * point never answered authentication left frames queued and the time
+     * event live: REMOVE_STA timed out and the firmware asserted (LMAC 0x125F),
+     * three joins in a row in #21. */
+    if (_sta_session_prot && _sta_mac_added && !_fw_error) {
+      iwx_session_prot_cmd sp{};
+      sp.id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(kStaMac, 0));
+      sp.action = htole32(IWX_FW_CTXT_ACTION_REMOVE);
+      sp.conf_id = htole32(IWX_SESSION_PROTECT_CONF_ASSOC);
+      if (const int e = send_cmd(iwx_cmd_id(IWX_SESSION_PROTECTION_CMD, IWX_MAC_CONF_GROUP, 0), &sp, sizeof(sp),
+                                 false, nullptr))
+        _log("station: could not cancel session protection (" + std::to_string(e) + ")");
+    }
+    if (_sta_sta_added && !_fw_error) {
+      const auto drain = [this](bool on) {
+        iwx_add_sta_cmd d{};
+        d.sta_id = IWX_STATION_ID;
+        d.mac_id_n_color = htole32(IWX_FW_CMD_ID_AND_COLOR(kStaMac, 0));
+        d.add_modify = IWX_STA_MODE_MODIFY;
+        d.station_flags = htole32(on ? IWX_STA_FLG_DRAIN_FLOW : 0u);
+        d.station_flags_msk = htole32(IWX_STA_FLG_DRAIN_FLOW);
+        uint32_t status = IWX_ADD_STA_SUCCESS;
+        return send_cmd_status(IWX_ADD_STA, &d, sizeof(d), &status);
+      };
+      int e = drain(true);
+      if (!e && !_fw_error) {
+        iwx_tx_path_flush_cmd f{};
+        f.sta_id = htole32(IWX_STATION_ID);
+        f.tid_mask = htole16(0xffff);
+        e = send_cmd(IWX_TXPATH_FLUSH, &f, sizeof(f), false, nullptr);
+        if (!e && !_fw_error) e = drain(false);
+      }
+      if (e) _log("station: could not flush before removing it (" + std::to_string(e) + ")");
+    }
+    if (_sta_sta_added && !_fw_error) {
       iwx_rm_sta_cmd rm{};
       rm.sta_id = IWX_STATION_ID;
       send_cmd(IWX_REMOVE_STA, &rm, sizeof(rm), false, nullptr);
@@ -436,7 +875,7 @@ void IwxDevice::sta_leave() {
     nic_unlock();
   }
   _sta_phy_added = _sta_mac_added = _sta_binding_added = _sta_sta_added = false;
-  _sta_queue_enabled = _sta_assoc = _sta_tlc = false;
+  _sta_queue_enabled = _sta_assoc = _sta_tlc = _sta_session_prot = false;
   _sta_ba_tids = 0;
   _staq.queued = 0;
 }

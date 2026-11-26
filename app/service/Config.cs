@@ -28,6 +28,32 @@ public sealed class ServiceConfig
     public string Country { get; set; } = "";
     /// <summary>Last 5 GHz channel a peer used (44 or 149), 0 if none.</summary>
     public int PeerChannel { get; set; }
+    // "Aggregate" (the A-MPDU switch) is gone: always on since 0.1.35, after
+    // AX201 (30.8 MB/s) and AX200 (9-25 MiB/s, #4) data. Old files' field is ignored.
+    /// <summary>
+    /// Experimental fast unlock of a passive 5 GHz AWDL channel (radio --fast-unlock, #11):
+    /// earlier, repeated discovery scans so the firmware learns the country sooner. Off by default.
+    /// </summary>
+    public bool FastUnlock { get; set; }
+    /// <summary>
+    /// Experimental coexistence plan (radio --coex-plan, ForbiddenItlwm PR #30): with the
+    /// station on another 5 GHz channel than AirDrop, the router's entries go into the AWDL
+    /// schedule and the listener stays silent in them. Off by default.
+    /// </summary>
+    public bool CoexPlan { get; set; }
+    /// <summary>
+    /// Experimental high-throughput mode (awdld -H -M 1500, inspired by YiHoooong/owly #65):
+    /// advertises Wi-Fi 6 HE80 in AWDL Data Path State TLV 12 on 5 GHz 80 MHz and raises
+    /// awdl0 MTU from 1450 to 1500. Off by default.
+    /// </summary>
+    public bool HighThroughput { get; set; }
+    /// <summary>
+    /// The user's manual choice when the card is not recognized by its ID
+    /// (Settings, "Wi-Fi card"): its PCI hardware ID ("PCI\VEN_xxxx&amp;DEV_yyyy")
+    /// and a CardCatalog.ManualModels key; both "" for automatic.
+    /// </summary>
+    public string ManualCard { get; set; } = "";
+    public string ManualModel { get; set; } = "";
     /// <summary>Seconds without AirDrop use before on-demand mode gives the card back.</summary>
     public int IdleSeconds { get; set; } = 90;
     /// <summary>Intel's own INF (oemNN.inf), remembered when the card is first taken.</summary>

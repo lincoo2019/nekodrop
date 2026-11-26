@@ -45,50 +45,28 @@ public static class Wlan
     }
 
     /// <summary>
-    /// Asks Windows to join the saved profiles in preference order, for when the
-    /// card is free but Windows is not connected (e.g. the user is on USB
-    /// tethering): the station needs the network's channel, BSSID and key, which
-    /// are only read from a live connection. Returns once one connects or after
-    /// `perProfile` each.
+    /// True while Windows is already associating, discovering or authenticating
+    /// on a WLAN interface: worth waiting a moment instead of cutting it off,
+    /// without calling WlanConnect on saved profiles (#4).
     /// </summary>
-    public static Network? ConnectSaved(out string why, TimeSpan perProfile)
+    public static bool IsConnecting()
     {
-        why = "no saved Wi-Fi profile in range";
-        if (WlanOpenHandle(2, IntPtr.Zero, out _, out var h) != 0) { why = "WLAN service unavailable"; return null; }
+        if (WlanOpenHandle(2, IntPtr.Zero, out _, out var h) != 0) return false;
         try
         {
-            if (WlanEnumInterfaces(h, IntPtr.Zero, out var listPtr) != 0) { why = "no WLAN interface"; return null; }
-            Guid guid;
+            if (WlanEnumInterfaces(h, IntPtr.Zero, out var listPtr) != 0) return false;
             try
             {
-                if (Marshal.ReadInt32(listPtr) == 0) { why = "no WLAN interface"; return null; }
-                guid = Marshal.PtrToStructure<Guid>(listPtr + 8);
+                int count = Marshal.ReadInt32(listPtr);
+                for (int i = 0; i < count; i++)
+                {
+                    var state = Marshal.ReadInt32(listPtr + 8 + i * 532 + 16 + 512);
+                    // 5 associating, 6 discovering, 7 authenticating.
+                    if (state is 5 or 6 or 7) return true;
+                }
+                return false;
             }
             finally { WlanFreeMemory(listPtr); }
-            if (WlanGetProfileList(h, ref guid, IntPtr.Zero, out var profiles) != 0) return null;
-            var names = new List<string>();
-            try
-            {
-                // WLAN_PROFILE_INFO_LIST: count, index, then WCHAR[256] + flags (516 bytes) each.
-                int n = Marshal.ReadInt32(profiles);
-                for (int i = 0; i < n; i++)
-                    names.Add(Marshal.PtrToStringUni(profiles + 8 + i * 516, 256).TrimEnd('\0'));
-            }
-            finally { WlanFreeMemory(profiles); }
-            foreach (var name in names)
-            {
-                var p = new WLAN_CONNECTION_PARAMETERS { wlanConnectionMode = 0, strProfile = name, dot11BssType = 1 };
-                if (WlanConnect(h, ref guid, ref p, IntPtr.Zero) != 0) continue;
-                var end = DateTime.UtcNow + perProfile;
-                while (DateTime.UtcNow < end)
-                {
-                    Thread.Sleep(500);
-                    var net = Query(h, guid, out var w, true);
-                    if (net is not null && (net.Open || net.Passphrase is not null || net.PskHex is not null)) return net;
-                    if (net is not null && w != "") { why = w; break; }
-                }
-            }
-            return null;
         }
         finally { WlanCloseHandle(h, IntPtr.Zero); }
     }
@@ -118,7 +96,8 @@ public static class Wlan
 
     static readonly string[] NotWired = ["TAP-Windows", "Wintun", "WireGuard", "Remote NDIS", "Apple Mobile Device", "Bluetooth"];
 
-    public sealed record SavedProfile(string Ssid, string? Passphrase, string? PskHex, bool Open);
+    public sealed record SavedProfile(string Ssid, string? Passphrase, string? PskHex, bool Open,
+                                      bool AutoConnect = true, bool Hidden = false);
 
     /// <summary>
     /// Every saved Wi-Fi profile Windows has that nekodrop's station can use
@@ -173,32 +152,22 @@ public static class Wlan
             var ssid = doc.Descendants(ns + "SSID").FirstOrDefault()?.Element(ns + "name")?.Value;
             var auth = doc.Descendants(ns + "authentication").FirstOrDefault()?.Value ?? "";
             if (string.IsNullOrEmpty(ssid)) return null;
-            if (auth == "open" && doc.Descendants(ns + "encryption").FirstOrDefault()?.Value == "none")
-                return new SavedProfile(ssid, null, null, true);
+            var autoConnect = doc.Descendants(ns + "connectionMode").FirstOrDefault()?.Value != "manual";
+            var hidden = doc.Descendants(ns + "nonBroadcast").FirstOrDefault()?.Value == "true";
+            if ((auth == "open" && doc.Descendants(ns + "encryption").FirstOrDefault()?.Value == "none") || auth == "OWE")
+                return new SavedProfile(ssid, null, null, true, autoConnect, hidden);
             if (auth is not ("WPA2PSK" or "WPAPSK" or "WPA3SAE")) return null; // enterprise: not yet
             var shared = doc.Descendants(ns + "sharedKey").FirstOrDefault();
             var key = shared?.Element(ns + "keyMaterial")?.Value;
             if (key is null || shared?.Element(ns + "protected")?.Value == "true") return null;
             return shared?.Element(ns + "keyType")?.Value == "networkKey" && key.Length == 64
-                ? new SavedProfile(ssid, null, key, false)
-                : new SavedProfile(ssid, key, null, false);
+                ? new SavedProfile(ssid, null, key, false, autoConnect, hidden)
+                : new SavedProfile(ssid, key, null, false, autoConnect, hidden);
         }
         catch (Exception) { return null; }
     }
 
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    struct WLAN_CONNECTION_PARAMETERS
-    {
-        public int wlanConnectionMode;
-        [MarshalAs(UnmanagedType.LPWStr)] public string strProfile;
-        public IntPtr pDot11Ssid;
-        public IntPtr pDesiredBssidList;
-        public int dot11BssType;
-        public uint dwFlags;
-    }
-
     [DllImport("wlanapi.dll")] static extern int WlanGetProfileList(IntPtr handle, ref Guid iface, IntPtr reserved, out IntPtr list);
-    [DllImport("wlanapi.dll")] static extern int WlanConnect(IntPtr handle, ref Guid iface, ref WLAN_CONNECTION_PARAMETERS p, IntPtr reserved);
 
     static Network? Query(IntPtr h, Guid guid, out string why, bool readKey)
     {
@@ -244,14 +213,18 @@ public static class Wlan
             WlanFreeMemory(c);
         }
 
-        // DOT11_AUTH_ALGORITHM: 1 open, 6 RSNA (802.1X), 7 RSNA-PSK, 8/9 WPA3 (SAE).
+        // DOT11_AUTH_ALGORITHM: 1 open, 6 RSNA (802.1X), 7 RSNA-PSK, 8 WPA3, 9 WPA3-SAE, 10 OWE.
         // DOT11_CIPHER_ALGORITHM: 0 none, 4 CCMP.
-        string security = auth switch { 1 => "open", 7 => "WPA2-Personal", 6 => "WPA2-Enterprise", 8 or 9 or 10 => "WPA3", _ => $"auth {auth}" };
-        if (auth == 1 && cipher == 0)
+        string security = auth switch { 1 => "open", 7 => "WPA2-Personal", 6 => "WPA2-Enterprise", 8 or 9 => "WPA3", 10 => "OWE", _ => $"auth {auth}" };
+        // Open, and Enhanced Open (OWE): no key; the radio finds OWE in the beacon.
+        if ((auth == 1 && cipher == 0) || (auth == 10 && cipher == 4))
             return new Network(ssid, bssid, channel, security, null, null, true);
-        if (auth != 7 || cipher != 4)
+        // WPA3 (SAE): the radio uses WPA2-PSK where the network also offers it
+        // (mixed, issue #12) and SAE with the same password where it does not.
+        var sae = (auth == 8 || auth == 9) && cipher == 4;
+        if ((auth != 7 && !sae) || cipher != 4)
         {
-            why = $"{security} is not supported beside AirDrop (WPA2-Personal with AES only)";
+            why = $"{security} is not supported beside AirDrop (WPA2/WPA3-Personal or Enhanced Open with AES)";
             return new Network(ssid, bssid, channel, security, null, null, false);
         }
         if (!readKey) return new Network(ssid, bssid, channel, security, null, null, false);

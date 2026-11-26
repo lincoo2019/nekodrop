@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Sparse package: gives nekodrop the package identity Windows 11 requires for
-     a verb on the first level of the Explorer context menu. It carries no
+     a verb on the first level of the Explorer context menu, and for a place in
+     the Share sheet (Explorer's "Share", other apps' share buttons). It carries no
      program files; its external location is the install folder, where
      nekodrop-shell.dll and nekodrop.exe are. install.ps1 signs it with the
      certificate made on this PC (Publisher must equal its subject); the client
@@ -14,7 +15,7 @@
          xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
          IgnorableNamespaces="uap uap10 desktop4 desktop5 com rescap">
   <Identity Name="nekodrop.shell" ProcessorArchitecture="neutral"
-            Publisher="CN=nekodrop driver (signed on this PC)" Version="0.1.0.0" />
+            Publisher="CN=nekodrop driver (signed on this PC)" Version="0.2.0.0" />
   <Properties>
     <DisplayName>nekodrop</DisplayName>
     <PublisherDisplayName>nekodrop project</PublisherDisplayName>
@@ -46,6 +47,13 @@
             </desktop5:ItemType>
           </desktop4:FileExplorerContextMenus>
         </desktop4:Extension>
+        <!-- Share sheet: files shared to nekodrop open its send window (App.Main) -->
+        <uap:Extension Category="windows.shareTarget">
+          <uap:ShareTarget Description="AirDrop">
+            <uap:SupportedFileTypes><uap:SupportsAnyFileType/></uap:SupportedFileTypes>
+            <uap:DataFormat>StorageItems</uap:DataFormat>
+          </uap:ShareTarget>
+        </uap:Extension>
         <com:Extension Category="windows.comServer">
           <com:ComServer>
             <com:SurrogateServer DisplayName="nekodrop context menu">

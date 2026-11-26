@@ -1,31 +1,38 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * KernelDevice: the listener of nekodrop-wlan.sys (the kernel Wi-Fi driver)
- * behind the same calls radio_main makes on IwxDevice, so the AWDL engine
+ * behind the radio backend contract (radio_backend.h), so the AWDL engine
  * and its upstream 0.6.0 policies run unchanged while Windows keeps its Wi-Fi
- * on the same card. Talks to \\.\NekodropAwdl (kdriver/nekoioctl.h). The
- * station calls exist only to satisfy radio_main; Windows owns the station.
+ * on the same card. Talks to \\.\NekodropAwdl (kdriver/nekoioctl.h).
+ *
+ * It implements only what kCapabilities declares: no Intel A-MPDU queue, no
+ * firmware scan, no country notice (the driver answers it itself) and no
+ * station (Windows owns it). radio_main never compiles those calls for this
+ * backend, so there are no stubs for them here.
  */
 #pragma once
 
 #include "plat.h"
-#include "iwx.h"
+#include "radio_backend.h"
 
+#include <array>
 #include <atomic>
 #include <deque>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 class KernelDevice {
 public:
-  using Logger = IwxDevice::Logger;
-  using RxHandler = IwxDevice::RxHandler;
-  using TxStatusHandler = IwxDevice::TxStatusHandler;
+  using Logger = RadioLogger;
+  using RxHandler = RadioRxHandler;
+  using TxStatusHandler = RadioTxStatusHandler;
+  static constexpr RadioCapabilities kCapabilities = radio::kernel_capabilities();
 
   explicit KernelDevice(Logger log) : _log(std::move(log)) {}
   ~KernelDevice() { stop(); }
 
-  bool open(const IwxDevice::Options &options, std::string &error);
+  bool open(const RadioOpenOptions &options, std::string &error);
   bool start_monitor(uint8_t channel, unsigned width_mhz, const uint8_t address[6]);
   bool set_channel(uint8_t channel, unsigned width_mhz);
   bool set_address(const uint8_t address[6]);
@@ -37,7 +44,9 @@ public:
   bool set_country(const std::string &alpha2);
   uint32_t channel_flags(uint8_t channel) const;
   bool transmit(const uint8_t *frame, size_t len, const TxRate &rate) { return transmit_slot(frame, len, rate) >= 0; }
-  int transmit_slot(const uint8_t *frame, size_t len, const TxRate &rate);
+  /* The driver rings the doorbell itself: `kick` is for the user-mode path
+   * (supports_batched_kick is off, so radio_main never calls kick_data here). */
+  int transmit_slot(const uint8_t *frame, size_t len, const TxRate &rate, bool kick = true);
   void set_tx_status_handler(TxStatusHandler handler) { _on_tx = std::move(handler); }
   void set_rx_handler(RxHandler handler) { _on_rx = std::move(handler); }
   int poll();
@@ -48,11 +57,6 @@ public:
   unsigned width_mhz() const { return _width; }
   const std::array<uint8_t, 6> &hw_address() const { return _hw; }
   void stop();
-
-  /* Windows runs the station on this card. */
-  int sta_transmit(const uint8_t *, size_t, const TxRate &, bool) { return -1; }
-  unsigned sta_tx_acked() const { return 0; }
-  unsigned sta_tx_failed() const { return 0; }
 
 private:
   bool ioctl(DWORD code, const void *in, DWORD inLength, void *out, DWORD outLength, DWORD *got = nullptr) const;

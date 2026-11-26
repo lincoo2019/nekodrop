@@ -2,97 +2,402 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:NekoDrop"
-        Title="{local:T set.title}" Width="520" Height="600" ResizeMode="CanMinimize"
-        WindowStartupLocation="CenterOwner"
-        Background="{DynamicResource Window}" Foreground="{DynamicResource Text}"
-        FontFamily="{DynamicResource UiFont}" FontSize="14">
+        Title="{local:T set.title}" Width="520" Height="620" MinWidth="460" MinHeight="480"
+        WindowStartupLocation="CenterScreen"
+        Foreground="{DynamicResource Text}" FontFamily="{DynamicResource UiFont}" FontSize="13">
   <Window.Resources>
-    <Style x:Key="CardBox" TargetType="Border">
-      <Setter Property="Background" Value="{DynamicResource Card}"/>
-      <Setter Property="BorderBrush" Value="{DynamicResource CardStroke}"/>
-      <Setter Property="BorderThickness" Value="1"/>
-      <Setter Property="CornerRadius" Value="8"/>
-      <Setter Property="Padding" Value="16,12"/>
-      <Setter Property="Margin" Value="0,0,0,4"/>
+    <!-- A setting: title and an optional line below on the left, its control on the right -->
+    <Style x:Key="Row" TargetType="DockPanel">
+      <Setter Property="LastChildFill" Value="True"/>
     </Style>
-    <Style x:Key="Caption" TargetType="TextBlock">
-      <Setter Property="FontSize" Value="12"/>
-      <Setter Property="Foreground" Value="{DynamicResource TextSecondary}"/>
-      <Setter Property="TextWrapping" Value="Wrap"/>
-    </Style>
-    <Style TargetType="RadioButton">
-      <Setter Property="Foreground" Value="{DynamicResource Text}"/>
-      <Setter Property="Margin" Value="0,6,0,0"/>
-    </Style>
-    <Style TargetType="CheckBox">
-      <Setter Property="Foreground" Value="{DynamicResource Text}"/>
-      <Setter Property="Margin" Value="0,6,0,0"/>
+    <Style x:Key="CardPad" TargetType="Border" BasedOn="{StaticResource WinCard}">
+      <Setter Property="Padding" Value="14"/>
+      <Setter Property="Margin" Value="0,0,0,10"/>
     </Style>
   </Window.Resources>
-  <ScrollViewer VerticalScrollBarVisibility="Auto">
-    <StackPanel Margin="24,16,24,20">
-      <TextBlock Text="{local:T set.heading}" FontSize="20" FontWeight="SemiBold" Margin="0,0,0,12"/>
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="40"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="56"/>
+    </Grid.RowDefinitions>
 
-      <Border Style="{StaticResource CardBox}">
-        <StackPanel>
-          <TextBlock Text="{local:T set.name}" FontWeight="SemiBold"/>
-          <TextBlock Text="{local:T set.nameHint}" Style="{StaticResource Caption}"/>
-          <TextBox x:Name="NameBox" Margin="0,8,0,0" Padding="6,4" MaxLength="40"/>
+    <!-- Title bar -->
+    <Border Grid.Row="0" BorderBrush="{DynamicResource Border}" BorderThickness="0,0,0,1" Padding="16,0,8,0">
+      <DockPanel>
+        <Button DockPanel.Dock="Right" Style="{StaticResource TitleButton}" Click="Cancel_Click" VerticalAlignment="Center"
+                AutomationProperties.Name="Close">
+          <TextBlock Style="{StaticResource Icon}" Text="&#xE8BB;" FontSize="10"/>
+        </Button>
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <TextBlock Style="{StaticResource Icon}" Text="&#xE713;" Margin="0,0,8,0"/>
+          <TextBlock Text="{local:T set.heading}" FontSize="13" FontWeight="SemiBold" VerticalAlignment="Center"/>
         </StackPanel>
-      </Border>
+      </DockPanel>
+    </Border>
 
-      <Border Style="{StaticResource CardBox}">
-        <StackPanel>
-          <TextBlock Text="{local:T set.folder}" FontWeight="SemiBold"/>
-          <DockPanel Margin="0,8,0,0">
-            <Button DockPanel.Dock="Right" Content="{local:T main.change}" Click="Browse_Click" Margin="8,0,0,0" Padding="12,4"/>
-            <TextBox x:Name="FolderBox" Padding="6,4" IsReadOnly="True"/>
-          </DockPanel>
-          <CheckBox x:Name="AskBox" Content="{local:T set.ask}"/>
-        </StackPanel>
-      </Border>
-
-      <Border Style="{StaticResource CardBox}">
-        <StackPanel>
-          <TextBlock Text="{local:T set.network}" FontWeight="SemiBold"/>
-          <RadioButton x:Name="ModeConcurrent" GroupName="mode" Content="{local:T mode.concurrent}"/>
-          <TextBlock Style="{StaticResource Caption}" Margin="20,0,0,0"
-                     Text="{local:T mode.concurrent.hint}"/>
-          <RadioButton x:Name="ModeOnDemand" GroupName="mode" Content="{local:T mode.ondemand}"/>
-          <TextBlock Style="{StaticResource Caption}" Margin="20,0,0,0"
-                     Text="{local:T mode.ondemand.hint}"/>
-          <RadioButton x:Name="ModeOff" GroupName="mode" Content="{local:T mode.off}"/>
-        </StackPanel>
-      </Border>
-
-      <Border Style="{StaticResource CardBox}">
-        <StackPanel>
-          <TextBlock Text="{local:T set.trusted}" FontWeight="SemiBold"/>
-          <TextBlock Text="{local:T set.trustedHint}" Style="{StaticResource Caption}"/>
-          <ListBox x:Name="TrustedList" Height="80" Margin="0,8,0,0"/>
-          <Button Content="{local:T set.remove}" Click="RemoveTrusted_Click" HorizontalAlignment="Left" Margin="0,6,0,0" Padding="12,4"/>
-        </StackPanel>
-      </Border>
-
-      <Border Style="{StaticResource CardBox}">
-        <StackPanel>
-          <TextBlock Text="{local:T set.language}" FontWeight="SemiBold"/>
-          <ComboBox x:Name="LanguageBox" Margin="0,8,0,0" HorizontalAlignment="Left" MinWidth="200">
-            <ComboBoxItem Tag="auto" Content="{local:T lang.auto}"/>
-            <ComboBoxItem Tag="zh" Content="简体中文"/>
-            <ComboBoxItem Tag="en" Content="English"/>
-          </ComboBox>
-        </StackPanel>
-      </Border>
-
-      <Border Style="{StaticResource CardBox}">
-        <CheckBox x:Name="StartupBox" Content="{local:T set.startup}" Margin="0"/>
-      </Border>
-
-      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-        <Button Content="{local:T set.save}" Click="Save_Click" Padding="20,6" IsDefault="True"/>
-        <Button Content="{local:T set.cancel}" Click="Cancel_Click" Padding="20,6" Margin="8,0,0,0" IsCancel="True"/>
+    <!-- Tabs -->
+    <Border Grid.Row="1" BorderBrush="{DynamicResource Border}" BorderThickness="0,0,0,1" Padding="16,0">
+      <StackPanel Orientation="Horizontal">
+        <RadioButton x:Name="TabGeneral" Style="{StaticResource Pivot}" Content="{local:T set.tab.general}" GroupName="tab" Checked="Tab_Checked"/>
+        <RadioButton x:Name="TabNetwork" Style="{StaticResource Pivot}" Content="{local:T set.tab.network}" GroupName="tab" Checked="Tab_Checked"/>
+        <RadioButton x:Name="TabAppleId" Style="{StaticResource Pivot}" Content="{local:T set.tab.appleid}" GroupName="tab" Checked="Tab_Checked"/>
+        <RadioButton x:Name="TabHardware" Style="{StaticResource Pivot}" Content="{local:T set.tab.hardware}" GroupName="tab" Checked="Tab_Checked"/>
+        <RadioButton x:Name="TabUpdates" Style="{StaticResource Pivot}" Content="{local:T set.tab.updates}" GroupName="tab" Checked="Tab_Checked"/>
       </StackPanel>
-    </StackPanel>
-  </ScrollViewer>
+    </Border>
+
+    <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto">
+      <Grid Margin="16">
+        <!-- General -->
+        <StackPanel x:Name="PageGeneral">
+          <Border Style="{StaticResource CardPad}">
+            <StackPanel>
+              <TextBlock Text="{local:T set.name}" Style="{StaticResource T13S}"/>
+              <TextBlock Text="{local:T set.nameHint}" Style="{StaticResource Sub12}" Margin="0,2,0,8"/>
+              <TextBox x:Name="NameBox" Style="{StaticResource WinTextBox}" MaxLength="40"/>
+            </StackPanel>
+          </Border>
+          <Border Style="{StaticResource CardPad}">
+            <DockPanel>
+              <Button DockPanel.Dock="Right" Style="{StaticResource WinButton}" Content="{local:T main.change}" Click="Browse_Click"
+                      VerticalAlignment="Center" Margin="12,0,0,0"/>
+              <StackPanel>
+                <TextBlock Text="{local:T set.folder}" Style="{StaticResource T13S}"/>
+                <TextBlock x:Name="FolderText" FontSize="12" Foreground="{DynamicResource Text2}" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+              </StackPanel>
+            </DockPanel>
+          </Border>
+          <Border Style="{StaticResource CardPad}">
+            <DockPanel>
+              <ComboBox x:Name="LanguageBox" DockPanel.Dock="Right" Style="{StaticResource WinCombo}" MinWidth="130" VerticalAlignment="Center">
+                <ComboBoxItem Tag="auto" Content="{local:T lang.auto}"/>
+                <ComboBoxItem Tag="zh" Content="简体中文"/>
+                <ComboBoxItem Tag="en" Content="English"/>
+              </ComboBox>
+              <TextBlock Text="{local:T set.language}" Style="{StaticResource T13S}" VerticalAlignment="Center"/>
+            </DockPanel>
+          </Border>
+          <Border Style="{StaticResource CardPad}">
+            <DockPanel>
+              <StackPanel x:Name="AccentPanel" DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center"/>
+              <StackPanel VerticalAlignment="Center">
+                <TextBlock Text="{local:T set.accent}" Style="{StaticResource T13S}"/>
+                <TextBlock Text="{local:T set.accentHint}" Style="{StaticResource Sub12}" Margin="0,2,0,0"/>
+              </StackPanel>
+            </DockPanel>
+          </Border>
+
+          <Border Style="{StaticResource CardPad}">
+            <DockPanel>
+              <Border DockPanel.Dock="Right" Style="{StaticResource SegmentBox}" VerticalAlignment="Center">
+                <StackPanel Orientation="Horizontal">
+                  <RadioButton x:Name="HubAuto" Style="{StaticResource Segment}" Content="{local:T set.hubIcon.auto}" GroupName="hub"/>
+                  <RadioButton x:Name="HubDesktop" Style="{StaticResource Segment}" Content="{local:T set.hubIcon.desktop}" Tag="&#xE7F4;" GroupName="hub"/>
+                  <RadioButton x:Name="HubLaptop" Style="{StaticResource Segment}" Content="{local:T set.hubIcon.laptop}" Tag="&#xE7F8;" GroupName="hub"/>
+                </StackPanel>
+              </Border>
+              <TextBlock Text="{local:T set.hubIcon}" Style="{StaticResource T13S}" VerticalAlignment="Center"/>
+            </DockPanel>
+          </Border>
+          <Border Style="{StaticResource CardPad}">
+            <StackPanel>
+              <DockPanel>
+                <CheckBox x:Name="StartupBox" DockPanel.Dock="Right" Style="{StaticResource WinToggle}"/>
+                <TextBlock Text="{local:T set.startup}" FontSize="13" FontWeight="Medium" VerticalAlignment="Center"/>
+              </DockPanel>
+              <Border Style="{StaticResource Rule}" Margin="0,12"/>
+              <DockPanel>
+                <CheckBox x:Name="HotkeyBox" DockPanel.Dock="Right" Style="{StaticResource WinToggle}"/>
+                <StackPanel>
+                  <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="{local:T set.hotkey}" FontSize="13" FontWeight="Medium" VerticalAlignment="Center"/>
+                    <!-- Click, then press the new keys (Esc cancels) -->
+                    <Button x:Name="HotkeyRecorder" Style="{StaticResource WinButton}" Padding="8,2" Margin="8,0,0,0" MinWidth="110"
+                            Click="HotkeyRecorder_Click" PreviewKeyDown="HotkeyRecorder_KeyDown" LostKeyboardFocus="HotkeyRecorder_LostFocus"
+                            ToolTip="{local:T set.hotkeyRecordTip}">
+                      <TextBlock x:Name="HotkeyText" FontFamily="Consolas" FontSize="11"/>
+                    </Button>
+                    <Button Style="{StaticResource QuietButton}" Content="{local:T set.hotkeyReset}" Click="HotkeyReset_Click"
+                            Padding="6,2" Margin="4,0,0,0"/>
+                  </StackPanel>
+                  <TextBlock Text="{local:T set.hotkeyHint}" Style="{StaticResource Sub12}" Margin="0,2,0,0"/>
+                </StackPanel>
+              </DockPanel>
+              <Border Style="{StaticResource Rule}" Margin="0,12"/>
+              <DockPanel>
+                <CheckBox x:Name="ShowSpeedBox" DockPanel.Dock="Right" Style="{StaticResource WinToggle}" Margin="12,0,0,0"/>
+                <StackPanel>
+                  <TextBlock Text="{local:T set.showSpeed}" FontSize="13" FontWeight="Medium"/>
+                  <TextBlock Text="{local:T set.showSpeedHint}" Style="{StaticResource Sub12}" Margin="0,2,0,0" TextWrapping="Wrap"/>
+                </StackPanel>
+              </DockPanel>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+
+        <!-- Network and receiving -->
+        <StackPanel x:Name="PageNetwork" Visibility="Collapsed">
+          <Border Style="{StaticResource CardPad}">
+            <StackPanel>
+              <TextBlock Text="{local:T set.network}" Style="{StaticResource T13S}" Margin="0,0,0,2"/>
+              <RadioButton x:Name="ModeConcurrent" Style="{StaticResource ModeCard}" GroupName="mode"
+                           Content="{local:T mode.concurrent}" Tag="{local:T mode.concurrent.hint}"/>
+              <RadioButton x:Name="ModeOnDemand" Style="{StaticResource ModeCard}" GroupName="mode"
+                           Content="{local:T mode.ondemand}" Tag="{local:T mode.ondemand.hint}"/>
+              <RadioButton x:Name="ModeOff" Style="{StaticResource ModeCard}" GroupName="mode"
+                           Content="{local:T mode.off}" Tag="{local:T mode.off.hint}"/>
+            </StackPanel>
+          </Border>
+          <Border Style="{StaticResource CardPad}">
+            <StackPanel>
+              <DockPanel>
+                <Border DockPanel.Dock="Right" Style="{StaticResource SegmentBox}" VerticalAlignment="Center" Margin="12,0,0,0">
+                  <StackPanel Orientation="Horizontal">
+                    <RadioButton x:Name="AutoAcceptOff" Style="{StaticResource Segment}" Content="{local:T set.autoAccept.off}" GroupName="autoaccept"/>
+                    <RadioButton x:Name="AutoAcceptContacts" Style="{StaticResource Segment}" Content="{local:T set.autoAccept.contacts}" GroupName="autoaccept"/>
+                    <RadioButton x:Name="AutoAcceptEveryone" Style="{StaticResource Segment}" Content="{local:T set.autoAccept.everyone}" GroupName="autoaccept"/>
+                  </StackPanel>
+                </Border>
+                <TextBlock Text="{local:T set.autoAccept}" Style="{StaticResource T13S}" VerticalAlignment="Center"/>
+              </DockPanel>
+              <TextBlock Text="{local:T set.autoAcceptHint}" Style="{StaticResource Sub12}" Margin="0,6,0,0"/>
+            </StackPanel>
+          </Border>
+          <Border Style="{StaticResource CardPad}">
+            <StackPanel>
+              <TextBlock Text="{local:T set.mediaTitle}" Style="{StaticResource T13S}" Margin="0,0,0,10"/>
+              <DockPanel>
+                <Border DockPanel.Dock="Right" Style="{StaticResource SegmentBox}" VerticalAlignment="Center" Margin="12,0,0,0">
+                  <StackPanel Orientation="Horizontal">
+                    <RadioButton x:Name="MediaCompatible" Style="{StaticResource Segment}" Content="{local:T set.media.compatible}" GroupName="mediafmt"/>
+                    <RadioButton x:Name="MediaOriginal" Style="{StaticResource Segment}" Content="{local:T set.media.original}" GroupName="mediafmt"/>
+                  </StackPanel>
+                </Border>
+                <StackPanel VerticalAlignment="Center">
+                  <TextBlock Text="{local:T set.mediaFormat}" FontSize="13" FontWeight="Medium"/>
+                  <TextBlock Text="{local:T set.mediaFormatHint}" Style="{StaticResource Sub12}" Margin="0,2,0,0"/>
+                </StackPanel>
+              </DockPanel>
+              <Border Style="{StaticResource Rule}" Margin="0,12"/>
+              <DockPanel>
+                <CheckBox x:Name="AutoConvertHeicBox" DockPanel.Dock="Right" Style="{StaticResource WinToggle}" Margin="12,0,0,0"/>
+                <StackPanel>
+                  <TextBlock Text="{local:T set.autoHeic}" FontSize="13" FontWeight="Medium" TextWrapping="Wrap"/>
+                  <TextBlock Text="{local:T set.autoHeicHint}" Style="{StaticResource Sub12}" Margin="0,2,0,0"/>
+                </StackPanel>
+              </DockPanel>
+            </StackPanel>
+          </Border>
+          <Border Style="{StaticResource CardPad}">
+            <StackPanel>
+              <DockPanel>
+                <Button x:Name="TrustedAdd" DockPanel.Dock="Right" Style="{StaticResource WinButton}" Content="{local:T set.trustedAdd}"
+                        Padding="10,4,10,4" Click="TrustedAdd_Click"/>
+                <TextBlock x:Name="TrustedTitle" Style="{StaticResource T13S}" VerticalAlignment="Center"/>
+              </DockPanel>
+              <TextBlock x:Name="TrustedEmpty" Text="{local:T set.trustedNone}" Style="{StaticResource Dim11}" FontSize="12" Margin="0,8,0,0"/>
+              <StackPanel x:Name="TrustedList" Margin="0,4,0,0"/>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+
+        <!-- Apple ID and Contacts Only -->
+        <StackPanel x:Name="PageAppleId" Visibility="Collapsed">
+          <Border Style="{StaticResource CardPad}">
+            <DockPanel>
+              <CheckBox x:Name="AppleIdOnBox" DockPanel.Dock="Right" Style="{StaticResource WinToggle}" Margin="12,0,0,0"
+                        Checked="AppleIdOn_Changed" Unchecked="AppleIdOn_Changed"/>
+              <StackPanel>
+                <StackPanel Orientation="Horizontal">
+                  <TextBlock Text="{local:T aid.on}" Style="{StaticResource T13S}"/>
+                  <Border Background="{DynamicResource WarnBg}" CornerRadius="4" Padding="6,1" Margin="8,0,0,0" VerticalAlignment="Center">
+                    <TextBlock Text="{local:T aid.experimental}" FontSize="11" Foreground="{DynamicResource Warn}"/>
+                  </Border>
+                </StackPanel>
+                <TextBlock Text="{local:T aid.onHint}" Style="{StaticResource Sub12}" TextWrapping="Wrap" Margin="0,2,0,0"/>
+              </StackPanel>
+            </DockPanel>
+          </Border>
+          <StackPanel x:Name="AppleIdBody">
+          <Border Style="{StaticResource CardPad}">
+            <StackPanel>
+              <TextBlock Text="{local:T aid.who}" Style="{StaticResource T13S}" Margin="0,0,0,2"/>
+              <RadioButton x:Name="ReceiveEveryone" Style="{StaticResource ModeCard}" GroupName="receive"
+                           Content="{local:T aid.everyone}" Tag="{local:T aid.everyoneHint}"/>
+              <RadioButton x:Name="ReceiveContacts" Style="{StaticResource ModeCard}" GroupName="receive"
+                           Content="{local:T aid.contacts}" Tag="{local:T aid.contactsHint}"/>
+            </StackPanel>
+          </Border>
+          <Border Style="{StaticResource CardPad}">
+            <StackPanel>
+              <TextBlock Text="{local:T aid.identity}" Style="{StaticResource T13S}"/>
+              <TextBlock x:Name="IdentityText" Style="{StaticResource Sub12}" TextWrapping="Wrap" Margin="0,4,0,10"/>
+              <WrapPanel>
+                <Button x:Name="SignInButton" Style="{StaticResource WinPrimary}" Content="{local:T aid.signInButton}" Click="SignIn_Click"
+                        Padding="12,6" Margin="0,0,8,8"/>
+                <Button Style="{StaticResource WinButton}" Content="{local:T aid.importMac}" Click="ImportMac_Click" Padding="12,6" Margin="0,0,8,8"/>
+                <Button x:Name="ContactsButton" Style="{StaticResource WinButton}" Content="{local:T aid.importContacts}" Click="ImportContacts_Click"
+                        Padding="12,6" Margin="0,0,8,8"/>
+                <Button x:Name="ExportAppleIdLogButton" Style="{StaticResource QuietButton}" Content="{local:T aid.exportLog}" Click="ExportAppleIdLog_Click"
+                        Padding="12,6" Margin="0,0,8,8"/>
+                <Button x:Name="SignOutButton" Style="{StaticResource QuietButton}" Content="{local:T aid.signOut}" Click="SignOut_Click"
+                        Padding="12,6" Margin="0,0,0,8"/>
+              </WrapPanel>
+            </StackPanel>
+          </Border>
+          <Border Style="{StaticResource CardPad}">
+            <StackPanel>
+              <TextBlock Text="{local:T aid.howTitle}" Style="{StaticResource T13S}"/>
+              <TextBlock Text="{local:T aid.howAppleId}" Style="{StaticResource Sub12}" TextWrapping="Wrap" Margin="0,6,0,0"/>
+              <TextBlock Text="{local:T aid.howMac}" Style="{StaticResource Sub12}" TextWrapping="Wrap" Margin="0,6,0,0"/>
+              <TextBlock Text="{local:T aid.howNote}" Style="{StaticResource Sub12}" TextWrapping="Wrap" Margin="0,6,0,0"/>
+            </StackPanel>
+          </Border>
+          </StackPanel>
+        </StackPanel>
+
+        <!-- Card and advanced -->
+        <StackPanel x:Name="PageHardware" Visibility="Collapsed">
+          <Border Style="{StaticResource CardPad}">
+            <StackPanel>
+              <DockPanel>
+                <Border x:Name="CardBadge" DockPanel.Dock="Right" CornerRadius="10" Padding="8,2" VerticalAlignment="Center">
+                  <TextBlock x:Name="CardBadgeText" FontSize="11" FontWeight="Medium"/>
+                </Border>
+                <TextBlock Text="{local:T set.card}" Style="{StaticResource T13S}" VerticalAlignment="Center"/>
+              </DockPanel>
+              <TextBlock x:Name="CardStatus" FontSize="13" Foreground="{DynamicResource Text2}" TextWrapping="Wrap" Margin="0,8,0,0"/>
+              <StackPanel x:Name="CardManual" Margin="0,10,0,0">
+                <TextBlock Text="{local:T set.card.hint}" Style="{StaticResource Sub12}"/>
+                <ComboBox x:Name="CardBox" Style="{StaticResource WinCombo}" DisplayMemberPath="Label" Margin="0,8,0,0"/>
+                <ComboBox x:Name="ModelBox" Style="{StaticResource WinCombo}" DisplayMemberPath="Label" Margin="0,8,0,0"/>
+                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                  <Button x:Name="CardApply" Style="{StaticResource WinPrimary}" Content="{local:T set.card.apply}" Click="CardApply_Click"/>
+                  <Button x:Name="CardAuto" Style="{StaticResource WinButton}" Content="{local:T set.card.auto}" Click="CardAuto_Click" Margin="8,0,0,0"/>
+                </StackPanel>
+                <TextBlock x:Name="CardError" Style="{StaticResource Sub12}" Margin="0,6,0,0"/>
+              </StackPanel>
+            </StackPanel>
+          </Border>
+          <Border Style="{StaticResource CardPad}">
+            <StackPanel>
+              <TextBlock Text="{local:T set.experimental}" Style="{StaticResource T13S}" Margin="0,0,0,10"/>
+              <DockPanel>
+                <CheckBox x:Name="CoexPlanBox" DockPanel.Dock="Right" Style="{StaticResource WinToggle}" Margin="12,0,0,0"/>
+                <StackPanel>
+                  <TextBlock Text="{local:T set.coexPlan}" FontSize="13" FontWeight="Medium" TextWrapping="Wrap"/>
+                  <TextBlock Text="{local:T set.coexPlan.short}" Style="{StaticResource Sub12}" Margin="0,2,0,0"/>
+                </StackPanel>
+              </DockPanel>
+              <Border Style="{StaticResource Rule}" Margin="0,12"/>
+              <DockPanel>
+                <CheckBox x:Name="FastUnlockBox" DockPanel.Dock="Right" Style="{StaticResource WinToggle}" Margin="12,0,0,0"/>
+                <StackPanel>
+                  <TextBlock Text="{local:T set.fastUnlock}" FontSize="13" FontWeight="Medium" TextWrapping="Wrap"/>
+                  <TextBlock Text="{local:T set.fastUnlock.short}" Style="{StaticResource Sub12}" Margin="0,2,0,0"/>
+                </StackPanel>
+              </DockPanel>
+              <Border Style="{StaticResource Rule}" Margin="0,12"/>
+              <DockPanel>
+                <CheckBox x:Name="HighThroughputBox" DockPanel.Dock="Right" Style="{StaticResource WinToggle}" Margin="12,0,0,0"/>
+                <StackPanel>
+                  <TextBlock Text="{local:T set.highThroughput}" FontSize="13" FontWeight="Medium" TextWrapping="Wrap"/>
+                  <TextBlock Text="{local:T set.highThroughput.short}" Style="{StaticResource Sub12}" Margin="0,2,0,0"/>
+                </StackPanel>
+              </DockPanel>
+              <Border Style="{StaticResource Rule}" Margin="0,12"/>
+              <DockPanel>
+                <CheckBox x:Name="BleStandbyBox" DockPanel.Dock="Right" Style="{StaticResource WinToggle}" Margin="12,0,0,0"/>
+                <StackPanel>
+                  <TextBlock Text="{local:T set.bleStandby}" FontSize="13" FontWeight="Medium" TextWrapping="Wrap"/>
+                  <TextBlock Text="{local:T set.bleStandby.short}" Style="{StaticResource Sub12}" Margin="0,2,0,0" TextWrapping="Wrap"/>
+                </StackPanel>
+              </DockPanel>
+            </StackPanel>
+          </Border>
+          <Border Style="{StaticResource CardPad}">
+            <DockPanel>
+              <Button DockPanel.Dock="Right" Style="{StaticResource WinButton}" Content="{local:T tray.report}" Click="Report_Click"/>
+              <TextBlock Text="{local:T set.diagnostics}" FontSize="13" FontWeight="Medium" VerticalAlignment="Center"/>
+            </DockPanel>
+          </Border>
+        </StackPanel>
+
+        <!-- About and updates -->
+        <StackPanel x:Name="PageUpdates" Visibility="Collapsed">
+          <Border Style="{StaticResource CardPad}">
+            <StackPanel>
+              <DockPanel>
+                <Button x:Name="CheckNowButton" DockPanel.Dock="Right" Style="{StaticResource WinButton}" Content="{local:T set.checkNow}"
+                        Click="CheckNow_Click" VerticalAlignment="Center"/>
+                <StackPanel>
+                  <TextBlock x:Name="VersionText" FontSize="14" FontWeight="SemiBold"/>
+                  <TextBlock Text="Windows 10 / 11 x64" Style="{StaticResource Sub12}" Margin="0,2,0,0"/>
+                </StackPanel>
+              </DockPanel>
+              <!-- What the last check found -->
+              <Border x:Name="UpdateBox" CornerRadius="8" Padding="10" Margin="0,12,0,0" Background="{DynamicResource AccentSubtle}" Visibility="Collapsed">
+                <StackPanel>
+                  <DockPanel>
+                    <Button x:Name="OpenReleasesButton" DockPanel.Dock="Right" Style="{StaticResource WinButton}" Content="{local:T update.openReleases}"
+                            Click="OpenReleases_Click" Visibility="Collapsed" Margin="8,0,0,0"/>
+                    <TextBlock x:Name="UpdateStatus" FontSize="12" TextWrapping="Wrap" VerticalAlignment="Center"/>
+                  </DockPanel>
+                  <Border x:Name="UpdateBarBox" Height="6" CornerRadius="3" Background="{DynamicResource Border}" Margin="0,8,0,0" Visibility="Collapsed">
+                    <local:Bar x:Name="UpdateBar" Fill="{DynamicResource Accent}"/>
+                  </Border>
+                </StackPanel>
+              </Border>
+              <Border Style="{StaticResource Rule}" Margin="0,12"/>
+              <DockPanel>
+                <CheckBox x:Name="CheckUpdatesBox" DockPanel.Dock="Right" Style="{StaticResource WinToggle}"/>
+                <TextBlock Text="{local:T set.checkUpdates}" FontSize="13" VerticalAlignment="Center"/>
+              </DockPanel>
+              <DockPanel Margin="0,12,0,0">
+                <CheckBox x:Name="PreviewUpdatesBox" DockPanel.Dock="Right" Style="{StaticResource WinToggle}" Margin="12,0,0,0"/>
+                <StackPanel>
+                  <TextBlock Text="{local:T set.previewUpdates}" FontSize="13"/>
+                  <TextBlock Text="{local:T set.updates.hint}" Style="{StaticResource Sub12}" Margin="0,2,0,0"/>
+                </StackPanel>
+              </DockPanel>
+              <Border Style="{StaticResource Rule}" Margin="0,12"/>
+              <DockPanel>
+                <CheckBox x:Name="DeleteInstallerBox" DockPanel.Dock="Right" Style="{StaticResource WinToggle}" Margin="12,0,0,0"/>
+                <StackPanel>
+                  <TextBlock Text="{local:T set.deleteInstaller}" FontSize="13"/>
+                  <TextBlock Text="{local:T set.deleteInstallerHint}" Style="{StaticResource Sub12}" Margin="0,2,0,0"/>
+                </StackPanel>
+              </DockPanel>
+              <Border Style="{StaticResource Rule}" Margin="0,12"/>
+              <DockPanel>
+                <Border DockPanel.Dock="Right" Style="{StaticResource SegmentBox}" VerticalAlignment="Center" Margin="12,0,0,0">
+                  <StackPanel Orientation="Horizontal">
+                    <RadioButton x:Name="UpdateWindow" Style="{StaticResource Segment}" Content="{local:T set.updateLaunch.window}" GroupName="updatelaunch"/>
+                    <RadioButton x:Name="UpdateTray" Style="{StaticResource Segment}" Content="{local:T set.updateLaunch.tray}" GroupName="updatelaunch"/>
+                  </StackPanel>
+                </Border>
+                <StackPanel VerticalAlignment="Center">
+                  <TextBlock Text="{local:T set.updateLaunch}" FontSize="13" FontWeight="Medium"/>
+                  <TextBlock Text="{local:T set.updateLaunchHint}" Style="{StaticResource Sub12}" Margin="0,2,0,0" TextWrapping="Wrap"/>
+                </StackPanel>
+              </DockPanel>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+      </Grid>
+    </ScrollViewer>
+
+    <!-- Footer -->
+    <Border Grid.Row="3" Background="{DynamicResource Card}" BorderBrush="{DynamicResource Border}" BorderThickness="0,1,0,0" Padding="16,0">
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+          <Button Style="{StaticResource WinButton}" Content="{local:T set.cancel}" Click="Cancel_Click" Padding="16,8" IsCancel="True"/>
+          <Button Style="{StaticResource WinPrimary}" Content="{local:T set.save}" Click="Save_Click" Padding="16,8" Margin="8,0,0,0" IsDefault="True"/>
+        </StackPanel>
+        <TextBlock x:Name="SavedText" FontSize="12" FontWeight="Medium" Foreground="{DynamicResource Success}" VerticalAlignment="Center"/>
+      </DockPanel>
+    </Border>
+  </Grid>
 </Window>

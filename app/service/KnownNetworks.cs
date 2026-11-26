@@ -23,6 +23,7 @@ public sealed class KnownNetworks
         public string? PskHex { get; set; }
         public bool Open { get; set; }
         public bool AutoConnect { get; set; } = true;
+        public bool Hidden { get; set; }
         public DateTime LastUsed { get; set; }
         [JsonIgnore] public bool HasKey => Open || Passphrase is not null || PskHex is not null;
     }
@@ -74,7 +75,8 @@ public sealed class KnownNetworks
     }
 
     /// <summary>Adds or updates a network (a new password replaces the old one).</summary>
-    public void Remember(string ssid, string? passphrase, string? pskHex, bool open, bool? autoConnect = null, bool used = true)
+    public void Remember(string ssid, string? passphrase, string? pskHex, bool open,
+                         bool? autoConnect = null, bool used = true, bool? hidden = null)
     {
         lock (_lock)
         {
@@ -87,6 +89,7 @@ public sealed class KnownNetworks
                 e.Open = open;
             }
             if (autoConnect is bool a) e.AutoConnect = a;
+            if (hidden is bool h) e.Hidden = h;
             if (used) e.LastUsed = DateTime.UtcNow;
             Save();
         }
@@ -120,8 +123,13 @@ public sealed class KnownNetworks
         var n = 0;
         foreach (var p in Wlan.SavedProfiles())
         {
-            if (Find(p.Ssid) is { HasKey: true }) continue;
-            Remember(p.Ssid, p.Passphrase, p.PskHex, p.Open, used: false);
+            if (Find(p.Ssid) is { HasKey: true } existing)
+            {
+                if (p.Hidden && !existing.Hidden)
+                    Remember(p.Ssid, null, null, false, used: false, hidden: true);
+                continue;
+            }
+            Remember(p.Ssid, p.Passphrase, p.PskHex, p.Open, autoConnect: p.AutoConnect, used: false, hidden: p.Hidden);
             n++;
         }
         return n;

@@ -3,7 +3,8 @@
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\..\..\scripts\toolchain.ps1"
 
-$umdfVersion = '2.33'
+# 2.31: the newest UMDF Windows 10 2004-22H2 has (2.33 is Windows 11 only, issue #3).
+$umdfVersion = '2.31'
 $tools = Initialize-Toolchain -UmdfVersion $umdfVersion
 $umdfMajor, $umdfMinor = $umdfVersion.Split('.')
 $out = Join-Path $PSScriptRoot 'build'
@@ -23,7 +24,11 @@ try {
 } finally { Pop-Location }
 
 Copy-Item "$PSScriptRoot\winawdl_regproxy.inf" $out -Force
-& $tools.InfVerif /w "$out\winawdl_regproxy.inf"
+# Basic validation (/v), not the Windows Driver rules (/w): those require the
+# reflector through Include/Needs WUDFRD.inf, which leaves the device without a
+# function driver on Windows 10 (#18). The package is signed on the user's PC,
+# never submitted for WHQL.
+& $tools.InfVerif /v "$out\winawdl_regproxy.inf"
 if ($LASTEXITCODE -ne 0) { throw "INF validation failed ($LASTEXITCODE)" }
 
 Get-ChildItem $out -Include *.dll, *.inf -Recurse | Select-Object Name, Length

@@ -386,12 +386,41 @@ struct iwx_prph_scratch_rbd_cfg {
 } __packed; /* PERIPH_SCRATCH_RBD_CFG_S */
 
 /*
+ * struct iwx_prph_scratch_uefi_cfg - UEFI reduce power table (Bz and later)
+ * @base_addr: reduce power table address
+ * @size: the size of the entire power table image
+ * @reserved: reserved
+ */
+struct iwx_prph_scratch_uefi_cfg {
+    __le64 base_addr;
+    __le32 size;
+    __le32 reserved;
+} __packed; /* PERIPH_SCRATCH_UEFI_CFG_S */
+
+/*
+ * struct iwx_prph_scratch_step_cfg - step equalizer data (Bz and later)
+ * @mbx_addr_0: [0:7] revision, [8:15] cnvi_to_cnvr length,
+ *    [16:23] cnvr_to_cnvi channel length, [24:31] radio1 reserved
+ * @mbx_addr_1: [0:7] radio2 reserved
+ */
+struct iwx_prph_scratch_step_cfg {
+    __le32 mbx_addr_0;
+    __le32 mbx_addr_1;
+} __packed;
+
+/*
  * struct iwx_prph_scratch_ctrl_cfg - prph scratch ctrl and config
  * @version: version information of context info and HW
  * @control: control flags of FH configurations
  * @pnvm_cfg: ror configuration
  * @hwm_cfg: hwm configuration
  * @rbd_cfg: default RX queue configuration
+ * @reduce_power_cfg: UEFI power reduction table
+ * @step_cfg: step configuration
+ *
+ * Bz firmware reads the two trailing members: dropping them shifts
+ * version.size and leaves the step equalizer unset, and the firmware then
+ * reports MSIX_HW_INT_CAUSES_REG_SW_ERR_BZ instead of ALIVE.
  */
 struct iwx_prph_scratch_ctrl_cfg {
     struct iwx_prph_scratch_version version;
@@ -399,18 +428,32 @@ struct iwx_prph_scratch_ctrl_cfg {
     struct iwx_prph_scratch_pnvm_cfg pnvm_cfg;
     struct iwx_prph_scratch_hwm_cfg hwm_cfg;
     struct iwx_prph_scratch_rbd_cfg rbd_cfg;
+    struct iwx_prph_scratch_uefi_cfg reduce_power_cfg;
+    struct iwx_prph_scratch_step_cfg step_cfg;
 } __packed; /* PERIPH_SCRATCH_CTRL_CFG_S */
+
+/* fseq images occupy the tail of the Bz DRAM map (iwl_context_info_dram_fseq). */
+#define IWX_NUM_DRAM_FSEQ_ENTRIES 8
+
+struct iwx_context_info_dram_fseq {
+    struct iwx_context_info_dram common;
+    uint64_t fseq_img[IWX_NUM_DRAM_FSEQ_ENTRIES];
+} __packed; /* PERIPH_SCRATCH_DRAM_MAP_S */
 
 /*
  * struct iwx_prph_scratch - peripheral scratch mapping
  * @ctrl_cfg: control and configuration of prph scratch
- * @dram: firmware images addresses in DRAM
+ * @fseq_override: FSEQ override parameters
+ * @step_analog_params: STEP analog calibration values
  * @reserved: reserved
+ * @dram: firmware images addresses in DRAM (with the Bz fseq tail)
  */
 struct iwx_prph_scratch {
     struct iwx_prph_scratch_ctrl_cfg ctrl_cfg;
-    __le32 reserved[16];
-    struct iwx_context_info_dram dram;
+    __le32 fseq_override;
+    __le32 step_analog_params;
+    __le32 reserved[8];
+    struct iwx_context_info_dram_fseq dram;
 } __packed; /* PERIPH_SCRATCH_S */
 
 /*
@@ -1056,7 +1099,7 @@ enum iwx_fw_ini_allocation_id {
 #define IWX_RADIO_REG_SYS_MANUAL_DFT_0        0xad4078
 #define IWX_RFIC_REG_RD                0xad0470
 #define IWX_WFPM_CTRL_REG            0xa03030
-#define IWX_WFPM_AUX_CTL_AUX_IF_MAC_OWNER_MSK    0x08000000
+#define IWX_WFPM_AUX_CTL_AUX_IF_MAC_OWNER_MSK    0x80000000
 #define IWX_ENABLE_WFPM                0x80000000
 
 #define IWX_AUX_MISC_MASTER1_EN            0xa20818

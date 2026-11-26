@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* The WPA2-PSK primitives the station needs, on Windows CNG (bcrypt). */
+/* The WPA2/WPA3 primitives the station needs, on Windows CNG (bcrypt). */
 #pragma once
 
 #include <cstddef>
@@ -23,5 +23,8 @@ bool aes_unwrap(const uint8_t *kek, size_t kek_len, const uint8_t *in, size_t in
 bool aes_wrap(const uint8_t *kek, size_t kek_len, const uint8_t *in, size_t in_len,
               std::vector<uint8_t> &out);
 bool random_bytes(uint8_t *out, size_t len);
+bool sha256(const uint8_t *data, size_t len, uint8_t out[32]);
+/* One AES block (ECB) with a 16-byte key: AES-CMAC is built on it (wpa3.cpp). */
+bool aes_encrypt_block(const uint8_t key[16], const uint8_t in[16], uint8_t out[16]);
 
 } // namespace crypto

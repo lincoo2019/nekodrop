@@ -3,9 +3,11 @@
  * The Wi-Fi station that runs beside AWDL, host side: join, WPA2-PSK, and the
  * bridge between the access point and Windows' TAP adapter.
  *
- * Supported: open networks and WPA2-Personal (AKM 2, CCMP), which is what
- * the firmware's key cache does in hardware. WPA3 (SAE), enterprise and
- * WPA1/TKIP are refused at start; the service then uses on-demand mode.
+ * Supported, all with CCMP in the firmware's key cache: open networks,
+ * WPA2-Personal (AKM 2, with management frame protection when the network
+ * requires it), WPA2-Personal SHA-256 (AKM 6), WPA3-Personal (SAE, AKM 8,
+ * hunting and pecking) and Enhanced Open (OWE, AKM 18). Enterprise (802.1X),
+ * SAE hash-to-element only networks, WEP and TKIP are refused at join.
  */
 #pragma once
 
@@ -16,8 +18,9 @@
 #include <string>
 #include <vector>
 
-#include "iwx.h"
+#include "sta_device.h"
 #include "tap.h"
+#include "wpa3.h"
 
 struct StaConfig {
   std::string ssid;
@@ -28,10 +31,11 @@ struct StaConfig {
   bool open = false;
   std::string tap;        /* TAP adapter name or GUID; empty: the first */
   unsigned max_width = 80;
-  /* Receive Block Ack sessions with the AP. Off by default until the host
-   * reorders by BAID/NSSN as Linux does: requests are declined (status 37)
-   * and the AP sends unaggregated (Codex review #24, agreed fix). */
-  bool block_ack = false;
+  /* Receive Block Ack sessions with the AP, reordered on the host by
+   * BAID/NSSN as Linux does (rx_reorder.h). ba=0 declines them (status 37)
+   * and the AP sends unaggregated, which costs the air the AWDL listener
+   * shares with it (Concurrent mode). */
+  bool block_ack = true;
 
   /* key=value lines: ssid, bssid, channel, passphrase, psk, open, tap, width, ba. */
   bool load(const std::string &path, std::string &error);
@@ -42,7 +46,7 @@ public:
   using Logger = std::function<void(const std::string &)>;
   enum class State { Idle, Listening, Authenticating, Associating, Handshake, Running, Failed };
 
-  WifiStation(IwxDevice &dev, Logger log) : _dev(dev), _log(std::move(log)) {}
+  WifiStation(StaDevice &dev, Logger log) : _dev(dev), _log(std::move(log)) {}
 
   bool start(const StaConfig &cfg, std::string &error);
   /* Whether a received frame belongs to the station (our BSS). */
@@ -59,6 +63,9 @@ public:
   TapAdapter &tap() { return _tap; }
   uint64_t rx_packets() const { return _rx_packets; }
   uint64_t tx_packets() const { return _tx_packets; }
+  /* Bytes of those packets, for the router's traffic class (--coex-plan). */
+  uint64_t rx_bytes() const { return _rx_bytes; }
+  uint64_t tx_bytes() const { return _tx_bytes; }
   /* Unicast only: Windows' multicast (mDNS, SSDP, LLMNR) never gets answers. */
   uint64_t tx_unicast() const { return _tx_unicast; }
   uint64_t rx_unicast() const { return _rx.unicast; }
@@ -75,6 +82,7 @@ public:
   }
 
 private:
+  void send_probe();
   void send_auth();
   void send_assoc();
   void handle_mgmt(const RxFrame &f);
@@ -83,6 +91,18 @@ private:
   void handle_eapol(const uint8_t *body, size_t len, bool encrypted);
   bool send_eapol(const std::vector<uint8_t> &eapol, bool protect);
   void reset_join_state();
+  /* Key management for this join, from the beacon's RSN element: "" or why not. */
+  std::string choose_akm();
+  std::vector<uint8_t> rsn_ie() const;
+  bool plain() const { return _akm == Akm::None; }
+  /* EAPOL-Key descriptor version: 2 (AKM 2), 3 (AKM 6), 0 (AKM-defined: SAE, OWE). */
+  uint16_t key_version() const { return _akm == Akm::PskSha256 ? 3 : (_akm == Akm::Sae || _akm == Akm::Owe) ? 0 : 2; }
+  bool compute_mic(const uint8_t *key, const uint8_t *data, size_t len, uint8_t out[16]) const;
+  const char *akm_name() const;
+  void sae_send_commit();
+  void sae_send_confirm();
+  void handle_sae(uint16_t seq, uint16_t status, const uint8_t *body, size_t len);
+  bool install_igtk();
   bool install_gtk();
   void learn_beacon(const uint8_t *f, size_t len);
   void fail(const std::string &why);
@@ -93,10 +113,12 @@ private:
   const uint8_t *kck() const { return _rekey ? _tptk : _ptk; }
   /* The GTK KDE from unwrapped key data: a 16-byte CCMP key, else false. */
   bool take_gtk(const std::vector<uint8_t> &plain);
+  /* The IGTK KDE (PMF), if the key data carries one. */
+  void take_igtk(const std::vector<uint8_t> &plain);
   bool mic_ok(const uint8_t *eapol, size_t len, const uint8_t *key = nullptr);
   void add_mic(std::vector<uint8_t> &eapol, const uint8_t *key = nullptr);
 
-  IwxDevice &_dev;
+  StaDevice &_dev;
   Logger _log;
   TapAdapter _tap;
   StaConfig _cfg;
@@ -105,11 +127,38 @@ private:
   uint64_t _now = 0, _state_since = 0, _last_try = 0;
   unsigned _tries = 0, _joins = 0;
 
+  /* Key management: AKM suite type in 00-0F-AC (0 = none, an open network). */
+  enum class Akm : uint8_t { None = 0, Psk = 2, PskSha256 = 6, Sae = 8, Owe = 18 };
+  Akm _akm = Akm::Psk;
+  bool _pmf = false; /* management frame protection negotiated */
+
   /* What the beacon told us. */
-  bool _beacon_seen = false, _ap_rsn = false, _ap_ht = false, _ap_vht = false, _ap_2ss = false;
+  bool _beacon_seen = false, _ap_rsn = false, _ap_ht = false, _ap_vht = false, _ap_2ss = false, _ap_wmm = false;
+  bool _ap_pairwise_ccmp = true, _ap_mfpc = false, _ap_mfpr = false, _ap_bip_cmac = true, _ap_h2e_only = false;
+  uint32_t _ap_akms = 0; /* bit n: AKM 00-0F-AC:n offered */
+  uint16_t _ap_rsn_caps = 0;
+  std::vector<uint8_t> _ap_rsn_raw;
+
+  /* SAE (WPA3-Personal) */
+  enum class SaeStep : uint8_t { None, Committed, Confirmed };
+  wpa3::Sae _sae;
+  SaeStep _sae_step = SaeStep::None;
+  std::vector<uint8_t> _sae_token;
+  uint16_t _sae_sc = 0;
+  unsigned _sae_tokens = 0;
+  /* OWE */
+  wpa3::Owe _owe;
+  /* PMF: the integrity group key */
+  uint8_t _igtk[16] = {}, _igtk_in_fw[16] = {};
+  unsigned _igtk_id = 4;
+  uint64_t _igtk_ipn = 0;
+  bool _igtk_valid = false, _igtk_in_fw_valid = false;
   uint16_t _ap_capab = 0, _beacon_int = 100;
   uint8_t _dtim = 1;
   unsigned _ap_width = 20;
+  uint16_t _ap_ht_cap = 0, _ap_vht_mcs = 0xffff;
+  uint8_t _ap_ampdu = 0;
+  uint32_t _ap_vht_cap = 0;
   std::vector<uint8_t> _ap_rates;
 
   /* WPA2 */
@@ -138,6 +187,6 @@ private:
 
   std::deque<std::vector<uint8_t>> _addba_answers;
   uint16_t _mgmt_seq = 0;
-  uint64_t _rx_packets = 0, _tx_packets = 0, _tx_unicast = 0;
+  uint64_t _rx_packets = 0, _tx_packets = 0, _tx_unicast = 0, _rx_bytes = 0, _tx_bytes = 0;
   RxStats _rx;
 };

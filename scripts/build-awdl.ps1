@@ -17,6 +17,8 @@ if (-not (Test-Path "$winawdl\upstream\owl\radiotap\radiotap.c")) {
   git -C "$winawdl" submodule update --init upstream/owl
   git -C "$winawdl\upstream\owl" submodule update --init radiotap
 }
+& python -I "$PSScriptRoot\patch-awdl.py" $winawdl
+if ($LASTEXITCODE -ne 0) { throw 'awdld patch failed' }
 $env:PATH = "$MinGW;$env:PATH"
 $build = "$winawdl\build\awdl"
 $make = if (Test-Path "$MinGW\mingw32-make.exe") { "$MinGW\mingw32-make.exe" } else { "$MinGW\make.exe" }

@@ -5,249 +5,98 @@
 <h1 align="center">nekodrop</h1>
 
 <p align="center">
-  <b>AirDrop on Windows, with the Intel Wi-Fi card already in your laptop. Wi-Fi keeps working.</b><br>
+  <b>Native AirDrop on Windows with your laptop's built-in Wi-Fi card. Wi-Fi keeps working.</b><br>
   No USB dongle, no Linux VM, no Mac.
 </p>
 
 <p align="center">
-  English · <a href="README.zh-CN.md">简体中文</a>
+  English · <a href="README.zh-CN.md">简体中文</a> · <a href="../../releases/latest">Download</a> · <a href="docs/COMPATIBILITY.md">Card compatibility</a> · <a href="CHANGELOG.md">Changelog</a>
 </p>
 
 <p align="center">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20x64-0078d4">
-  <img alt="card" src="https://img.shields.io/badge/card-Intel%20AX201%20(tested)%20%7C%20AX200%2FAX210%2FAX211%20(untested)-6c5ce7">
+  <img alt="speed" src="docs/badges/speed.svg">
+  <img alt="card" src="docs/badges/card.svg">
   <img alt="license" src="https://img.shields.io/badge/license-GPL--2.0-blue">
-  <img alt="status" src="https://img.shields.io/badge/status-experimental-orange">
 </p>
 
 <p align="center">
   <img src="docs/demo.gif" width="760" alt="Two-way AirDrop between iPhone and Windows 11 on built-in Intel AX201 while Wi-Fi stays connected">
   <br>
-  <sub>
-    <b>Real-hardware capture (unmodified iPhone ↔ Windows 11, built-in Intel AX201 on 5 GHz ch 44, Wi-Fi stays online):</b><br>
-    ① iOS AirDrop discovers the PC and sends a photo → ② Accepted on Windows while WPA2 Wi-Fi stays connected → ③ Full-res (3556×2000) photo opens intact → ④ Explorer right-click → <i>Send with nekodrop</i> → ⑤ Pick nearby iPhone → ⑥ Native AirDrop banner opens in iOS Photos.
-  </sub>
+  <sub>Real hardware: unmodified iPhone ↔ Windows 11 on a built-in Intel AX201, Wi-Fi online the whole time.</sub>
 </p>
 
----
+## Highlights
 
-## What it does
+- **53 MB/s both ways.** An 846 MB file in about 16 s on an Intel AX201, 0 drops ([details](#speed)).
+- **Your Wi-Fi stays online.** One card runs your Wi-Fi connection and AirDrop at the same time.
+- **The card you already have.** Intel AX200 / AX201 / AX210 / AX211 / 9560, Realtek RTL8852CE, MediaTek MT7902 / MT7921 / MT7922. No dongle ([all cards](#supported-cards)).
+- **Works like a Mac.** iPhone, iPad and Mac see your PC in the AirDrop sheet. Send with Explorer's right-click **Send with nekodrop** or the Windows Share sheet.
+- **Contacts Only** (experimental) with your Apple ID or a Mac's certificate ([how](docs/USAGE.md#contacts-only-apple-id-experimental)).
+- **Install and forget.** One installer, auto-updates, a self-healing service and a one-click restore back to Windows Wi-Fi.
 
-- **Receive from iPhone, iPad and Mac.** nekodrop shows up in the AirDrop sheet like any Apple device. Files land in a folder you choose (default `Downloads\nekodrop`), and you can accept or decline each transfer from a notification.
-- **Send to Apple devices.** Right-click a file in Explorer and choose **Send with nekodrop**. This is on the Windows 11 first-level menu, the classic menu and *Send to*. Then pick a nearby device.
-- **Stay online.** In *Wi-Fi and AirDrop together* mode nekodrop drives the card itself. It joins your Wi-Fi on one virtual interface and runs AWDL (Apple Wireless Direct Link) on the other. Windows sees your internet connection as a wired adapter called **nekodrop**.
-- **Manage Wi-Fi.** Scanning, connecting, hidden networks and saved networks with auto-connect all work. Saved Windows Wi-Fi profiles are imported, and captive portals (hotel, airport and campus sign-in pages) are detected and opened in your browser.
-- **Recover by itself.** A service watches the radio, the AWDL daemon and the AirDrop engine and restarts whatever stops. It starts with Windows.
-- **Tray app in Chinese and English**, with a light UI, system notifications and a settings window.
+## Speed
 
-## Tested on real hardware
+Measured on Intel AX201, Windows 11, `v2.2.9+` with High-throughput mode (HE80 + MTU 1500):
 
-Everything below was tested by the author on their own laptop, not just in theory:
+| Direction | Speed | Test |
+|---|---|---|
+| PC → iPhone | **53.00 MB/s** (50.55 MiB/s) | 846 MB in 15.97 s, 99.85% Block Ack, 0 drops |
+| iPhone → PC | **53.28 MB/s** net (50.81 MiB/s) · 49.66 MB/s end-to-end | 846 MB in 15.84 s net / 17.00 s total, 0 drops |
 
-| | |
-|---|---|
-| Wi-Fi card | **Intel Wi-Fi 6 AX201 160MHz** (CNVi, firmware `iwlwifi-QuZ-a0-hr-b0-68`) |
-| OS | Windows 11 Pro x64 |
-| iPhone → Windows | ✅ works: photos and files arrive intact |
-| Windows → iPhone | ✅ works: right-click → Send with nekodrop, accepted and received on the iPhone |
-| Wi-Fi at the same time | ✅ works: the PC stays online through nekodrop's own WPA2 connection while AirDrop runs, including with Wi-Fi and AWDL on the same 5 GHz channel |
-| Internet speed while AirDrop runs | about **28 Mbps** download at peak (≈2,370 packets/s sustained for 20 s, 5 GHz channel 44, 80 MHz, WPA2). Estimated from the radio's packet counters assuming full-size 1,500-byte packets, during ordinary use, not a speed test, so the link's real maximum may be higher. Block Ack declined (the default since 0.1.1); with Block Ack on, the peak seen was ~22 Mbps |
+How we measure: [docs/TESTING.md](docs/TESTING.md).
 
-Other AX201 laptops should behave the same, since the chip and firmware are identical, but only this one has been tested. Reports from other machines are welcome in [Issues](../../issues).
+## Supported cards
 
-## Supported hardware
+| Vendor | Cards | Status |
+|---|---|---|
+| **Intel** | AX201 · AX200 · AX210 · AX211 · AX411 / Killer AX1690 · 9560 | Tested (AX201 by the author, others by users) |
+| **Intel** | BE200 (Wi-Fi 7) | Experimental |
+| **Realtek** | RTL8852CE | User-tested, ~24.5 MB/s (on demand) |
+| **MediaTek** | MT7902 | Tested both ways, Wi-Fi at the same time |
+| **MediaTek** | MT7922 / RZ616 · MT7921 / RZ608 | Experimental (MT7922 tested both ways) |
 
-nekodrop talks to the Wi-Fi chip directly, so it only works on chips it has a driver for. It supports every card the upstream driver ([ForbiddenItlwm](https://github.com/retropineaple/ForbiddenItlwm)'s `hal_iwx`) ships firmware for. **Only the AX201 has been tested on real hardware**; the others are ported from upstream and untested.
-
-| Card | PCI IDs (`8086:`) | Firmware | Status |
-|---|---|---|---|
-| **Intel Wi-Fi 6 AX201** 160 MHz (CNVi) | `02F0` `06F0` `34F0` `3DF0` `4DF0` `43F0` `A0F0` | `Qu/QuZ-hr-b0-68` | ✅ **tested** (QuZ on `43F0`) |
-| Intel Wireless-AC 9560 / 9462 / 9461 on Qu/QuZ (CNVi) | same IDs as AX201 | `Qu/QuZ-jf-b0-68` | ⚠️ untested |
-| Intel Wi-Fi 6 AX200 (discrete) | `2723` | `cc-a0-68` | ✅ iPhone → PC receive reported working ([#1](../../issues/1)) |
-| Intel Wi-Fi 6E AX210 (discrete) | `2725` | `ty-a0-gf-a0-68` + PNVM | ⚠️ untested |
-| Intel Wi-Fi 6E AX211 / AX411 (CNVi, 12th gen+) | `7AF0` `7A70` `51F0` `51F1` `54F0` `7F70` | `so-a0-gf(4)-a0-68` + PNVM | ⚠️ untested |
-| Intel Wi-Fi 6 AX203 / 9560 on So | same IDs as AX211 | `so-a0-hr/jf-b0-68` | ⚠️ untested |
-| Intel SnJ `2726`, QnJ `2720`, Meteor Lake `7E40`/`2729` | | not shipped upstream | ❌ |
-| Intel BE200 / BE201 (Wi-Fi 7) | | no upstream driver | ❌ |
-| Realtek, MediaTek, Qualcomm, Broadcom | | | ❌ |
-
-To check your card: *Device Manager → Network adapters*. The installer refuses to run on cards not in this table. On an untested card nekodrop may fail to start the firmware; if it does, the card stays usable: run **restore** (below) and please report the log in an [issue](../../issues).
-
-### Something went wrong? One-click restore
-
-Start menu → **nekodrop - restore Windows Wi-Fi** (or double-click `restore.cmd` in `C:\Program Files\nekodrop`). It stops nekodrop, gives the card back to Intel's driver, removes nekodrop's driver packages and brings Windows Wi-Fi back, whatever state nekodrop left the card in. nekodrop stays installed; run the installer again to use it. Log: `C:\ProgramData\nekodrop\restore.log`.
-
-## Requirements
-
-- Windows 10 2004 (build 19041) or later, x64. Windows 11 recommended.
-- A supported Intel Wi-Fi card (see above; AX201 is the tested one).
-- Administrator rights to install.
-- Bluetooth, for sending: AirDrop wakes nearby Apple devices with a Bluetooth LE beacon.
-- On the Apple side, AirDrop set to **Everyone for 10 Minutes**. *Contacts Only* needs an Apple ID certificate nekodrop doesn't have.
+Not listed means not supported (Qualcomm, Broadcom, Intel BE201/BE211…). PCI IDs, firmware and per-card notes: **[Card compatibility](docs/COMPATIBILITY.md)** · **[Status and how to add a card](docs/CARDS.md)**.
 
 ## Install
 
-1. Download `nekodrop-<version>-setup.exe` from [Releases](../../releases) and run it.
-2. The installer:
-   - copies the files to `C:\Program Files\nekodrop`;
-   - creates a code-signing certificate **on your PC**, signs the small register-proxy driver with it, trusts it, and **deletes the private key**, so nothing else can ever be signed with it;
-   - creates the TAP adapter **nekodrop** (TAP-Windows, signed by OpenVPN);
-   - adds two inbound firewall rules, link-local addresses only (TCP 8771-8779, UDP 5353);
-   - installs and starts the **NekoDropService** service.
-3. The tray icon (the purple cat) appears. Open it and turn on **Allow receiving**.
+1. Windows 10 2004+ / 11 x64, a supported card, Bluetooth on.
+2. Download `nekodrop-<version>-setup.exe` from **[Releases](../../releases/latest)** and run it.
+3. Click the purple cat in the tray and turn on **Allow receiving**. On the iPhone, set AirDrop to **Everyone for 10 Minutes**.
 
-On first start nekodrop takes the Wi-Fi card away from the Intel driver and reconnects you to the network Windows was using. The Windows Wi-Fi icon disappears; use nekodrop's **Wi-Fi…** window instead.
+Something broke? Start menu → **nekodrop - restore Windows Wi-Fi** gives the card back to Windows. More: [Troubleshooting](docs/SUPPORT.md).
 
-### Uninstall
+## Screenshots
 
-Use *Settings → Apps → nekodrop → Uninstall*, or run `uninstall.ps1` in the install folder. Uninstalling gives the card back to the Intel driver, then removes the service, the driver package, the certificate trust and the firewall rules.
+<table>
+  <tr>
+    <td align="center"><img src="docs/screenshots/main-radar.png" width="260" alt="Main window: radar"><br><sub>Nearby devices on a radar</sub></td>
+    <td align="center"><img src="docs/screenshots/send.png" width="230" alt="Send window"><br><sub>Right-click → Send with nekodrop</sub></td>
+    <td align="center"><img src="docs/screenshots/wifi.png" width="240" alt="Wi-Fi window"><br><sub>nekodrop's own Wi-Fi</sub></td>
+  </tr>
+</table>
 
-## Usage
+More screenshots and every feature: [Using nekodrop](docs/USAGE.md).
 
-| I want to… | Do this |
+## Documentation
+
+| | |
 |---|---|
-| Receive | Keep **Allow receiving** on. On the iPhone, tap Share → AirDrop and pick your PC's name |
-| Send | Right-click files → **Send with nekodrop** → pick a device. Or drag files onto the main window |
-| Change Wi-Fi | Tray → **Wi-Fi…**: pick a network, enter the password, Connect |
-| Hidden network | **Wi-Fi…** → *Hidden network*: type the SSID and password |
-| Sign in to hotel Wi-Fi | Connect; the sign-in page opens in your browser by itself |
-| Give the card back to Windows | Tray → *Wi-Fi and AirDrop* → **Take the card on demand** or **AirDrop off** |
-| Change name, folder or language | Tray → **Settings…** |
+| [Using nekodrop](docs/USAGE.md) | Features, install details, modes, Wi-Fi security, Contacts Only, experimental switches, updates, uninstall |
+| [Troubleshooting](docs/SUPPORT.md) | Common problems, one-click restore, the diagnostic report |
+| [Card compatibility](docs/COMPATIBILITY.md) · [Card status](docs/CARDS.md) | Every card, PCI ID and firmware; how to port a new card |
+| [How it works](docs/HOW-IT-WORKS.md) | Architecture, project status, building from source |
+| [Credits](docs/CREDITS.md) | Contributors, where the code comes from, licenses |
+| [Changelog](CHANGELOG.md) | Release history |
 
-### Modes
+## Contributors
 
-| Mode | Internet | AirDrop |
-|---|---|---|
-| **Wi-Fi and AirDrop together** (default) | Through nekodrop's own Wi-Fi connection (adapter "nekodrop") | Always available |
-| **Take the card on demand** | The normal Intel driver | nekodrop takes the card when an iPhone nearby opens AirDrop or you send. Internet drops during the transfer |
-| **AirDrop off** | The normal Intel driver | Off |
+Thanks to [@BaiBaiAi](https://github.com/BaiBaiAi), [@XXD051030](https://github.com/XXD051030), [@GGBond-cer](https://github.com/GGBond-cer), [@DaiJiequn](https://github.com/DaiJiequn), [@sh17632](https://github.com/sh17632), [@YiHoooong](https://github.com/YiHoooong), [@Yanlyn](https://github.com/Yanlyn) and everyone who sent logs. What each of them did: [Credits](docs/CREDITS.md#contributors).
 
-### Wi-Fi security
-
-| Network | Together mode |
-|---|---|
-| Open | ✅ |
-| WPA/WPA2-Personal | ✅ |
-| WPA2/WPA3 transition | ✅ (joins with WPA2) |
-| Captive portal | ✅ detected, sign-in page opened |
-| Hidden SSID | ✅ |
-| WPA3-Personal only (SAE) | ❌ not yet. nekodrop switches to *on demand* |
-| WPA2/WPA3-Enterprise (802.1X, PEAP…) | ❌ not yet. nekodrop switches to *on demand* |
-| WEP | ❌ |
-
-## Status
-
-| Part | State |
-|---|---|
-| User-mode Intel driver: firmware boot, monitor, inject, scan | ✅ works on AX201; AX210 family path (gen3 context info, IML, PNVM) ported |
-| iPhone → Windows | ✅ works (photos received intact, hash-checked) |
-| Windows → iPhone | ✅ works (tested on AX201) |
-| Wi-Fi and AirDrop at the same time | ✅ works (WPA2, DHCP, DNS through the "nekodrop" adapter) |
-| Wi-Fi manager, saved networks, captive portal | ✅ |
-| Service, tray app, notifications, context menu, installer | ✅ |
-| WPA3-only, 802.1X, WEP | ⏳ planned |
-| Other Intel cards (AX200/AX210/AX211/AX411, 9560 on Qu) | 🧪 ported from upstream, untested on hardware |
-| Kernel WiFiCx driver (`kdriver/`) | 🧊 shelved: experimental and **not installed** by the setup. See [docs/KERNEL.md](docs/KERNEL.md) |
-
-## How it works
-
-```
- nekodrop.exe (tray app, your session) ──JSON pipe──► NekoDropService (SYSTEM)
-   │  AirDrop engine (Python)                         │ takes/gives back the card
-   │  notifications · context menu · send window      │ Wi-Fi manager, watchdogs
-   │                                                  ▼
-   └── awdl0 (Wintun, IPv6) ◄── awdld (AWDL, OWL) ◄─pipe─ nekodrop-radio (user-mode Intel driver)
-                                                          ├ MAC 0: AWDL on channel 6/44/149
-     "nekodrop" TAP adapter ◄── Ethernet bridge ◄─────────┤ MAC 1: station, joined to your router
-     (Windows' internet)                                  └ UMDF register proxy + user-mode DMA → AX201
-```
-
-1. **Register proxy.** A tiny UMDF driver (`driver/regproxy`) binds to the AX201 in place of Intel's driver. It does nothing but map the card's registers and interrupts into one user-mode process. No kernel code of ours runs.
-2. **User-mode driver.** `nekodrop-radio` (`iwxradio/`) is a port of the OpenBSD/itlwm `iwx` driver to user mode. It loads Intel's firmware through user-mode DMA, then runs two MACs at once: one listens and injects AWDL frames, the other is a normal Wi-Fi station with WPA2 (4-way handshake, keys in firmware, rate control).
-3. **AWDL.** `awdld` (OWL, the Open Wireless Link) speaks Apple's AWDL protocol over the radio pipe and exposes the link as the IPv6 interface `awdl0`.
-4. **AirDrop.** A Python engine speaks AirDrop over `awdl0`: mDNS discovery, HTTPS on port 8771 (spare ports 8772-8779), the `/Discover`, `/Ask` and `/Upload` flow, and the BLE beacon used for sending.
-5. **Internet.** Frames from the station MAC are bridged to the TAP adapter "nekodrop". Windows treats it as Ethernet and gets an address by DHCP.
-
-Design notes: [docs/DESIGN.md](docs/DESIGN.md) (driver, DMA, risks) · [docs/CLIENT.md](docs/CLIENT.md) (service, client, modes).
-
-## Troubleshooting
-
-| Symptom | Try |
-|---|---|
-| iPhone doesn't see the PC | Set the iPhone's AirDrop to *Everyone for 10 Minutes*, turn it off and on (this clears a cached record), and keep the phone unlocked nearby |
-| The PC shows up twice on the iPhone | A cached record from an earlier run. Toggle AirDrop on the iPhone |
-| No internet | Tray → **Wi-Fi…**: check you're connected. The network may need a sign-in page or be WPA3-only/802.1X (see above) |
-| The Windows Wi-Fi icon disappeared | Expected in *together* mode: nekodrop owns the card. Use **Wi-Fi…**, or switch to *on demand* |
-| Something else | Logs: `C:\ProgramData\nekodrop\service.log` (radio, AWDL, Wi-Fi) and `%LocalAppData%\nekodrop\engine.log` (AirDrop). Please attach them to an issue |
-
-## Building from source
-
-Needs Visual Studio 2022 Build Tools (C++, Windows SDK, CMake), the .NET 8 SDK and Git. Inno Setup 6 is optional (without it you get a zip). No WDK install is needed: the NuGet package is used.
-
-```powershell
-git clone https://github.com/zheznanohana/nekodrop.git
-cd nekodrop
-.\scripts\fetch-deps.ps1        # winawdl, ForbiddenItlwm (firmware), MinGW, WDK NuGet → third_party\
-.\scripts\build-installer.ps1   # everything → build\nekodrop-0.1.2-setup.exe
-.\scripts\build-radio.ps1       # just the user-mode driver, plus its offline self-tests
-```
-
-| Folder | What |
-|---|---|
-| `iwxradio/` | User-mode Intel driver (C++): firmware, AWDL monitor/inject, station, WPA2, UMAC scan |
-| `driver/regproxy/` | UMDF register-proxy driver |
-| `app/service/` | NekoDropService (C#): card ownership, radio supervision, Wi-Fi manager |
-| `app/client/` | Tray app (C# WPF): UI, notifications, AirDrop engine host |
-| `app/shellext/` | Windows 11 context-menu handler |
-| `installer/` | Inno Setup script, install/uninstall scripts, TAP setup |
-| `kdriver/` | Shelved kernel WiFiCx driver (experimental, not shipped) |
-
-## Where the code comes from
-
-nekodrop is built on other open-source projects. This section says exactly what was **used as source code** (copied, ported or bundled) and what was only **studied as a reference**.
-
-### Source code used
-
-| Project | License | What nekodrop takes from it | Where it ends up |
-|---|---|---|---|
-| [retropineaple/ForbiddenItlwm](https://github.com/retropineaple/ForbiddenItlwm) 0.6.0 (itlwm fork, macOS) | GPL-2.0 | The Intel 22000-series driver `hal_iwx`: firmware loading, TLV parsing, context info, TX/RX rings, firmware commands, the register header `if_iwxreg.h`. Its AWDL strategies too: channel following (the 44/149 min rule, country-code learning), receive Block Ack, promiscuous off during BA, rate stepping, host-side unicast resend, beacon hints | `iwxradio/`, ported from kernel C to a user-mode C++ driver |
-| ForbiddenItlwm's firmware folder | Intel redistribution license | iwlwifi firmware `iwlwifi-Qu*-hr-b0-68.ucode` | shipped in `radio\firmware\` |
-| [raph559/winawdl](https://github.com/raph559/winawdl) | MIT | The way to take over a PCIe Wi-Fi card from user mode on Windows: the UMDF register-proxy driver (originally for Realtek RTL8852CE) and user-mode DMA; the radio pipe protocol | `driver/regproxy/` (adapted to the AX201's PCI IDs), `iwxradio/` (pipe and DMA) |
-| winawdl `awdl/` (`awdld`) | GPL-3.0-or-later (builds on OWL) | The AWDL daemon: OWL's protocol core with a Windows I/O layer and Wintun | built from source, shipped as `awdl\awdld.exe` |
-| winawdl `airdrop/` | MIT | The AirDrop engine in Python: mDNS, the HTTPS receiver, the sender, the BLE beacon | shipped as `airdrop\` with two small patches (`scripts/patch-engine.py`: stable instance name, spare ports) |
-| [seemoo-lab/owl](https://github.com/seemoo-lab/owl) | GPL-3.0 | The AWDL implementation inside `awdld` | through winawdl |
-| [Wintun](https://www.wintun.net/) | Wintun license | The `awdl0` virtual interface | `awdl\wintun.dll` (prebuilt) |
-| [TAP-Windows6](https://github.com/OpenVPN/tap-windows6) | GPL-2.0 / OpenVPN | The "nekodrop" virtual Ethernet adapter for Windows' internet | installed by the setup (signed OpenVPN installer) |
-
-### Studied as references (no code copied)
-
-| Project | What it was used for |
-|---|---|
-| OpenBSD `iwx(4)`, Linux `iwlwifi` | How the firmware, UMAC scan, station mode and keys work |
-| [seemoo-lab/opendrop](https://github.com/seemoo-lab/opendrop) | The AirDrop protocol (`/Discover`, `/Ask`, `/Upload`, mDNS records) |
-| [microsoft/Windows-driver-samples](https://github.com/microsoft/Windows-driver-samples) | WiFiCx structure for the shelved kernel driver (`kdriver/`) |
-| [t4t5/owly](https://github.com/t4t5/owly), [JungyoKim/WirDrop](https://github.com/JungyoKim/WirDrop) | Other AirDrop-on-other-platforms attempts, compared during design |
-
-### Written for nekodrop
-
-- `iwxradio/`: the user-mode port itself, plus everything Windows-specific: running two MACs at once (AWDL listener plus Wi-Fi station on its own PHY), station mode with WPA2 (4-way handshake, keys in firmware, TLC rate control), bridging to TAP, firmware UMAC scan, beacon parsing and security detection.
-- `app/service/`: the Windows service: card ownership, radio and awdld supervision, the Wi-Fi manager (DPAPI-encrypted saved networks, auto-connect, hidden networks, captive-portal detection).
-- `app/client/`: the tray app (WPF), notifications, the send window, the Wi-Fi window, Chinese/English UI.
-- `app/shellext/`: the Windows 11 context-menu handler.
-- `installer/`: the Inno Setup installer, the on-PC driver signing, TAP setup and uninstall.
+Bug reports with a [diagnostic report](docs/SUPPORT.md#reporting-a-problem-the-diagnostic-report) are welcome in [Issues](../../issues). Community: [LINUX DO](https://linux.do/).
 
 ## License
 
-nekodrop as a whole is **GPL-2.0** (see [LICENSE](LICENSE)), because `iwxradio/` derives from itlwm/ForbiddenItlwm.
-
-- `if_iwxreg.h`: dual BSD/GPL-2.0.
-- `driver/regproxy` and the AirDrop engine: keep winawdl's MIT license.
-- `awdld`: GPL-3.0-or-later, from winawdl/OWL. It is a separate program talking over a pipe.
-- iwlwifi firmware: Intel's redistribution license (`licenses\iwlwifi-firmware.txt`).
-- Wintun and TAP-Windows: their own licenses.
-
-The installer copies every license into `licenses\`.
-
-## Disclaimer
+**GPL-2.0** ([LICENSE](LICENSE)); bundled components keep their own licenses ([details](docs/CREDITS.md#license)).
 
 nekodrop is an independent project, not affiliated with or endorsed by Apple or Intel. AirDrop, iPhone, iPad and Mac are trademarks of Apple Inc.; Intel is a trademark of Intel Corporation. nekodrop replaces your Wi-Fi driver while it runs. It's experimental software, provided as is, without warranty.

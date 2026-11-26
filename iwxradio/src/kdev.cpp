@@ -21,7 +21,7 @@ bool KernelDevice::ioctl(DWORD code, const void *in, DWORD inLength, void *out, 
   return ok != FALSE;
 }
 
-bool KernelDevice::open(const IwxDevice::Options &options, std::string &error) {
+bool KernelDevice::open(const RadioOpenOptions &options, std::string &error) {
   _handle = CreateFileA(NEKO_AWDL_USER_PATH, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
                         FILE_FLAG_OVERLAPPED, nullptr);
   if (_handle == INVALID_HANDLE_VALUE) {
@@ -151,7 +151,7 @@ uint32_t KernelDevice::channel_flags(uint8_t channel) const {
   }
 }
 
-int KernelDevice::transmit_slot(const uint8_t *frame, size_t len, const TxRate &rate) {
+int KernelDevice::transmit_slot(const uint8_t *frame, size_t len, const TxRate &rate, bool /*kick*/) {
   if (len > 4000) return -1;
   std::vector<uint8_t> in(sizeof(NEKO_TX) + len);
   NEKO_TX t{};

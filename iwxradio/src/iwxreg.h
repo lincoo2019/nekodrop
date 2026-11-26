@@ -22,6 +22,7 @@ struct iwx_rx_transfer_desc {
   uint16_t reserved[3];
   uint64_t addr;
 } __packed;
+#include "iwx_mld.h"
 #ifdef _MSC_VER
 #pragma pack(pop)
 #pragma warning(pop)

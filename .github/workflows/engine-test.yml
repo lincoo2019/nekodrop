@@ -1,0 +1,60 @@
+# Runs winawdl's own AirDrop engine tests on Windows twice: on the engine as
+# pinned, and on the engine after scripts/patch-engine.py. A test that passes
+# on the first and fails on the second is a regression nekodrop's patches made.
+name: engine-test
+on:
+  workflow_dispatch:
+  push:
+    paths: ['scripts/patch-engine.py', 'scripts/test-mdns-compat.py', 'scripts/test-engine-features.py', 'scripts/fetch-deps.ps1', '.github/workflows/engine-test.yml']
+permissions:
+  contents: read
+jobs:
+  engine:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fetch the pinned winawdl
+        shell: pwsh
+        run: |
+          $line = Select-String -Path scripts\fetch-deps.ps1 -Pattern 'Get-Repo winawdl (\S+) (\S+)' | Select-Object -First 1
+          $url, $commit = $line.Matches[0].Groups[1].Value, $line.Matches[0].Groups[2].Value
+          git clone -q $url "$env:RUNNER_TEMP\winawdl"
+          git -C "$env:RUNNER_TEMP\winawdl" checkout -q $commit
+          Copy-Item -Recurse "$env:RUNNER_TEMP\winawdl\airdrop" "$env:RUNNER_TEMP\pinned"
+          Copy-Item -Recurse "$env:RUNNER_TEMP\winawdl\airdrop" "$env:RUNNER_TEMP\patched"
+          python -I scripts\patch-engine.py "$env:RUNNER_TEMP\patched"
+          if ($LASTEXITCODE) { throw 'patch-engine.py failed' }
+      - name: Run the tests on both
+        shell: pwsh
+        run: |
+          $results = @{}
+          foreach ($which in 'pinned', 'patched') {
+            Push-Location "$env:RUNNER_TEMP\$which"
+            $log = "$env:RUNNER_TEMP\$which.log"
+            python -m unittest discover -s tests -v *> $log
+            $results[$which] = @{}
+            Get-Content $log | ForEach-Object {
+              if ($_ -match '^(test\S+) \((\S+)\).* \.\.\. (ok|FAIL|ERROR|skipped.*)$') { $results[$which]["$($Matches[2]).$($Matches[1])"] = ($Matches[3] -split ' ')[0] }
+            }
+            Pop-Location
+            "== ${which}: $($results[$which].Count) tests"
+            Get-Content $log | Select-Object -Last 5
+          }
+          $regressions = $results['pinned'].Keys | Where-Object { $results['pinned'][$_] -eq 'ok' -and $results['patched'][$_] -ne 'ok' }
+          $results['patched'].Keys | Sort-Object | ForEach-Object { "{0,-8} {1,-8} {2}" -f $results['pinned'][$_], $results['patched'][$_], $_ }
+          if ($results['patched'].Count -eq 0) { throw 'no test results parsed' }
+          if ($regressions) { throw "regressions: $($regressions -join ', ')" }
+      - name: Check IPv6-only mDNS replies
+        shell: pwsh
+        run: python -I scripts/test-mdns-compat.py "$env:RUNNER_TEMP\patched" -v
+      - name: Check link extraction and media capabilities
+        shell: pwsh
+        run: python -I scripts/test-engine-features.py "$env:RUNNER_TEMP\patched" -v
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: engine-test-logs
+          path: ${{ runner.temp }}/*.log

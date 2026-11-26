@@ -86,6 +86,14 @@ public sealed class Engine : IDisposable
         if (Directory.Exists(openssl)) psi.Environment["PATH"] = openssl + ";" + Environment.GetEnvironmentVariable("PATH");
         psi.Environment["PYTHONIOENCODING"] = "utf-8";
         psi.Environment["NEKODROP_SERVICE_ID"] = s.ServiceId; /* one device on the iPhone across restarts */
+        if (s.MediaFormat == "original") psi.Environment["NEKODROP_MEDIA_MODE"] = "original";
+        if (s.BleStandby) psi.Environment["NEKODROP_BLE_STANDBY"] = "1";
+        // Contacts Only: the Apple ID identity for installer\nekodrop_identity.py.
+        if (s.AppleIdOn && AppleId.Present)
+        {
+            psi.Environment["NEKODROP_IDENTITY"] = AppleId.Dir;
+            psi.Environment["NEKODROP_RECEIVE"] = s.Receive == "contacts" ? "contacts" : "everyone";
+        }
         try { _process = Process.Start(psi); }
         catch (Exception e) { error = e.Message; return false; }
         if (_process is null) { error = "the engine did not start"; return false; }

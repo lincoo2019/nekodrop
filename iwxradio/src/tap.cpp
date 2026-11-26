@@ -90,7 +90,12 @@ bool TapAdapter::open(const std::string &wanted, std::string &error) {
     error = "cannot read the network adapter class";
     return false;
   }
-  std::string guid;
+  /* Try every matching tap0901 entry: a removed phantom adapter can leave a
+   * stale registry entry ahead of a live one and fail with ERROR_FILE_NOT_FOUND
+   * (issue #20). */
+  HANDLE h = INVALID_HANDLE_VALUE;
+  std::string last_path;
+  DWORD last_err = 0;
   for (DWORD i = 0;; i++) {
     char sub[256];
     DWORD len = sizeof(sub);
@@ -102,23 +107,29 @@ bool TapAdapter::open(const std::string &wanted, std::string &error) {
     RegCloseKey(key);
     if (component != "tap0901" || id.empty()) continue;
     const std::string name = connection_name(id);
-    if (wanted.empty() || wanted == id || wanted == name) {
-      guid = id;
+    if (!wanted.empty() && wanted != id && wanted != name) continue;
+    const std::string path = "\\\\.\\Global\\" + id + ".tap";
+    HANDLE cand = CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_SYSTEM | FILE_FLAG_OVERLAPPED, nullptr);
+    if (cand != INVALID_HANDLE_VALUE) {
+      h = cand;
       _name = name;
       break;
     }
+    last_path = path;
+    last_err = GetLastError();
   }
   RegCloseKey(cls);
-  if (guid.empty()) {
-    error = "no TAP-Windows (tap0901) adapter found: install tap-windows6";
-    return false;
-  }
-  const std::string path = "\\\\.\\Global\\" + guid + ".tap";
-  HANDLE h = CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
-                         FILE_ATTRIBUTE_SYSTEM | FILE_FLAG_OVERLAPPED, nullptr);
   if (h == INVALID_HANDLE_VALUE) {
-    error = "cannot open " + path + " (error " + std::to_string(GetLastError()) +
-            "): is another program using the TAP adapter?";
+    if (last_path.empty()) {
+      error = "no TAP-Windows (tap0901) adapter found: install tap-windows6";
+    } else if (last_err == ERROR_FILE_NOT_FOUND) {
+      error = "cannot open " + last_path +
+              " (error 2: TAP adapter is not present; reinstall nekodrop to recreate it)";
+    } else {
+      error = "cannot open " + last_path + " (error " + std::to_string(last_err) +
+              "): is another program using the TAP adapter?";
+    }
     return false;
   }
   DWORD got = 0;

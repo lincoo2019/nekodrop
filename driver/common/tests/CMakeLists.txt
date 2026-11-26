@@ -1,0 +1,10 @@
+cmake_minimum_required(VERSION 3.20)
+project(mtk_dma_common_tests LANGUAGES C)
+
+enable_testing()
+add_executable(wdf_common_buffer_test wdf_common_buffer_test.c)
+set_target_properties(wdf_common_buffer_test PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+if(MSVC)
+    target_compile_options(wdf_common_buffer_test PRIVATE /W4 /WX)
+endif()
+add_test(NAME wdf_common_buffer COMMAND wdf_common_buffer_test)

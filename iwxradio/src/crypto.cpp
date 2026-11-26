@@ -156,6 +156,23 @@ bool aes_wrap(const uint8_t *kek, size_t kek_len, const uint8_t *in, size_t in_l
   return true;
 }
 
+bool sha256(const uint8_t *data, size_t len, uint8_t out[32]) {
+  BCRYPT_ALG_HANDLE h = nullptr;
+  if (BCryptOpenAlgorithmProvider(&h, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0) return false;
+  BCRYPT_HASH_HANDLE hash = nullptr;
+  const bool ok = BCryptCreateHash(h, &hash, nullptr, 0, nullptr, 0, 0) == 0 &&
+                  BCryptHashData(hash, const_cast<PUCHAR>(data), static_cast<ULONG>(len), 0) == 0 &&
+                  BCryptFinishHash(hash, out, 32, 0) == 0;
+  if (hash) BCryptDestroyHash(hash);
+  BCryptCloseAlgorithmProvider(h, 0);
+  return ok;
+}
+
+bool aes_encrypt_block(const uint8_t key[16], const uint8_t in[16], uint8_t out[16]) {
+  AesEcb aes(key, 16);
+  return aes.ok() && aes.encrypt(in, out);
+}
+
 bool random_bytes(uint8_t *out, size_t len) {
   return BCryptGenRandom(nullptr, out, static_cast<ULONG>(len), BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
 }

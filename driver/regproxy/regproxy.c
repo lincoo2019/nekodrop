@@ -10,8 +10,9 @@
 #include <ntstatus.h>
 #include <wdf.h>
 
-/* Intel's CSR window (BAR0) is 8 KiB on the 22000 family; winawdl's 8852CE
- * build looked for its 1 MiB BAR2 instead. Smaller resources are not it. */
+/* Select the largest memory BAR of at least 8 KiB: Intel's 22000/AX210 CSR
+ * window is 8 KiB (BAR0), while Realtek RTL8852CE/BE use a 1 MiB BAR2 and
+ * MediaTek MT7921/MT7922 use a 1 MiB BAR0. Smaller resources are not CSRs. */
 #define MIN_BAR_LEN 0x2000u
 
 typedef struct _DEVICE_CONTEXT {
@@ -80,21 +81,23 @@ NTSTATUS RpEvtPrepareHardware(WDFDEVICE Device, WDFCMRESLIST Raw,
   DEVICE_CONTEXT *ctx = GetCtx(Device);
   ULONG count = WdfCmResourceListGetCount(Translated);
 
+  PCM_PARTIAL_RESOURCE_DESCRIPTOR best = NULL;
   for (ULONG i = 0; i < count; i++) {
     PCM_PARTIAL_RESOURCE_DESCRIPTOR res =
         WdfCmResourceListGetDescriptor(Translated, i);
     if (!res || res->Type != CmResourceTypeMemory) continue;
     if (res->u.Memory.Length < MIN_BAR_LEN) continue;
-
-    NTSTATUS st =
-        WdfDeviceMapIoSpace(Device, res->u.Memory.Start, res->u.Memory.Length,
-                            MmNonCached, &ctx->bar);
-    if (!NT_SUCCESS(st)) return st;
-    ctx->bar_len = res->u.Memory.Length;
-    ctx->bar_phys = res->u.Memory.Start;
-    return STATUS_SUCCESS;
+    if (!best || res->u.Memory.Length > best->u.Memory.Length) best = res;
   }
-  return STATUS_DEVICE_CONFIGURATION_ERROR;
+  if (!best) return STATUS_DEVICE_CONFIGURATION_ERROR;
+
+  NTSTATUS st = WdfDeviceMapIoSpace(Device, best->u.Memory.Start,
+                                    best->u.Memory.Length, MmNonCached,
+                                    &ctx->bar);
+  if (!NT_SUCCESS(st)) return st;
+  ctx->bar_len = best->u.Memory.Length;
+  ctx->bar_phys = best->u.Memory.Start;
+  return STATUS_SUCCESS;
 }
 
 NTSTATUS RpEvtReleaseHardware(WDFDEVICE Device, WDFCMRESLIST Translated) {

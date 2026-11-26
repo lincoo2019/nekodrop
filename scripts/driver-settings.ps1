@@ -9,8 +9,9 @@ $DriverSettings = @{
   PackageFiles = @('winawdl_regproxy.inf', 'winawdl_regproxy.dll')
   CertSubject  = 'CN=winairdrop driver signing (local test)'
   CertFile     = 'winairdrop-signing.cer'
-  # The cards the radio drives (iwxradio/src/cards.h): Qu/QuZ CNVi, AX200, AX210 family.
-  DeviceIds    = @('43F0', 'A0F0', '02F0', '06F0', '34F0', '3DF0', '4DF0', '2723', '2725', '7A70', '7AF0', '51F0', '51F1', '54F0', '7F70')
+  # The cards the radio drives (iwxradio/src/cards.h): Qu/QuZ CNVi, AX200,
+  # AX210 family and the Bz AX203.
+  DeviceIds    = @('43F0', 'A0F0', '02F0', '06F0', '34F0', '3DF0', '4DF0', '2723', '2725', '7A70', '7AF0', '51F0', '51F1', '54F0', '7F70', '7740')
   TrustStores  = @('Root', 'TrustedPublisher')
 }
 

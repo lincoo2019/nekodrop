@@ -1,0 +1,48 @@
+name: 问题反馈 / Bug report
+description: nekodrop 用不了或出错 / nekodrop does not work or shows an error
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先生成**诊断报告**：开始菜单 → **nekodrop - diagnostic report**（或托盘 → 生成诊断报告）。桌面上会出现两个文件，报告已复制到剪贴板。
+        Please create the **diagnostic report** first: Start menu → **nekodrop - diagnostic report** (or tray → Diagnostic report). Two files appear on the Desktop; the report is on the clipboard.
+
+        SSID、MAC 地址、内网 IP、用户名和电脑名会自动替换成占位符，发出前请先看一眼。0.1.6 及更早的版本：下载 [report.ps1](https://github.com/zheznanohana/nekodrop/blob/main/installer/report.ps1)，运行 `powershell -ExecutionPolicy Bypass -File report.ps1`。
+        SSIDs, MAC and private IP addresses, your user name and computer name are replaced by placeholders; please look it over before posting. On 0.1.6 or older, download [report.ps1](https://github.com/zheznanohana/nekodrop/blob/main/installer/report.ps1) and run `powershell -ExecutionPolicy Bypass -File report.ps1`.
+
+        完整步骤 / Full steps: [README](https://github.com/zheznanohana/nekodrop/blob/main/README.zh-CN.md#反馈问题诊断报告) · [README (English)](https://github.com/zheznanohana/nekodrop#reporting-a-problem-the-diagnostic-report)
+  - type: input
+    id: version
+    attributes:
+      label: nekodrop 版本 / Version
+      placeholder: "0.1.7"
+    validations:
+      required: true
+  - type: dropdown
+    id: card
+    attributes:
+      label: 网卡 / Wi-Fi card
+      options:
+        - AX200
+        - AX201
+        - AX210
+        - AX211 / AX411 / Killer 1690
+        - 9560 / 9462 / 9461
+        - 其他 / other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么 / What happened
+      description: 做了什么、看到了什么提示、期望是什么 / What you did, what you saw, what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: 诊断报告 / Diagnostic report
+      description: 粘贴 nekodrop-report-*.md 的内容（剪贴板里就有），并把 nekodrop-logs-*.txt 拖到下面作为附件 / Paste nekodrop-report-*.md (it is on the clipboard) and drag nekodrop-logs-*.txt below as an attachment
+    validations:
+      required: true

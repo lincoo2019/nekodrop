@@ -31,8 +31,15 @@ bool IwxDevice::scan_config() {
   iwx_scan_config cfg{};
   cfg.tx_chains = htole32(valid_tx_ant());
   cfg.rx_chains = htole32(valid_rx_ant());
-  const uint8_t addSta = cmd_version(IWX_LONG_GROUP, IWX_ADD_STA);
-  if (addSta == IWX_FW_CMD_VER_UNKNOWN || addSta < 12) cfg.bcast_sta_id = IWX_AUX_STA_ID;
+  if (!use_mld()) {
+    const uint8_t addSta = cmd_version(IWX_LONG_GROUP, IWX_ADD_STA);
+    if (addSta == IWX_FW_CMD_VER_UNKNOWN || addSta < 12) cfg.bcast_sta_id = IWX_AUX_STA_ID;
+  } else {
+    const uint8_t scanCfgVer = cmd_version(IWX_LONG_GROUP, IWX_SCAN_CFG_CMD);
+    /* Linux iwl_mvm_config_scan: deprecated on SCAN_CFG_CMD >= 5 (API 100);
+     * older MLD images want 0xff. */
+    if (scanCfgVer != IWX_FW_CMD_VER_UNKNOWN && scanCfgVer < 5) cfg.bcast_sta_id = 0xff;
+  }
   if (!nic_lock()) return false;
   const int err = send_cmd(iwx_cmd_id(IWX_SCAN_CFG_CMD, IWX_LONG_GROUP, 0), &cfg, sizeof(cfg), false, nullptr);
   nic_unlock();
@@ -48,7 +55,8 @@ bool IwxDevice::umac_scan(const uint8_t *channels, size_t count, const uint8_t *
                           const uint8_t address[6]) {
   if (!_open || _scan_running) return false;
   const uint8_t ver = cmd_version(IWX_LONG_GROUP, IWX_SCAN_REQ_UMAC);
-  if (ver != 14) {
+  const bool ver_ok = use_mld() ? (ver >= 14 && ver <= 17) : (ver == 14);
+  if (!ver_ok) {
     _log("scan: SCAN_REQ_UMAC version " + std::to_string(ver) + " not implemented");
     return false;
   }
@@ -121,7 +129,17 @@ bool IwxDevice::umac_scan(const uint8_t *channels, size_t count, const uint8_t *
   for (size_t i = 0; i < count && used < IWX_SCAN_MAX_NUM_CHANS_V3; i++) {
     const uint8_t ch = channels[i];
     auto &c = cp.channel_config[used];
-    if (extChan) {
+    uint32_t chan_flags = active ? 1u : 0u; /* probe for SSID 0 */
+    if (use_mld() && ver >= 17) {
+      /* SCAN_REQ_UMAC v17 (same struct size as v14): band moves to flags[31:30]
+       * and v2.band becomes v5.psd_20 (0 for 2.4/5 GHz). */
+      const uint32_t band = ch <= 14 ? IWX_PHY_BAND_24 : IWX_PHY_BAND_5;
+      c.v2.channel_num = ch;
+      c.v2.band = 0;
+      c.v2.iter_count = 1;
+      c.v2.iter_interval = 0;
+      chan_flags |= band << IWX_CHAN_CFG_FLAGS_BAND_POS;
+    } else if (extChan) {
       c.v2.channel_num = ch;
       c.v2.band = ch <= 14 ? IWX_PHY_BAND_24 : IWX_PHY_BAND_5;
       c.v2.iter_count = 1;
@@ -131,7 +149,7 @@ bool IwxDevice::umac_scan(const uint8_t *channels, size_t count, const uint8_t *
       c.v1.iter_count = 1;
       c.v1.iter_interval = 0;
     }
-    c.flags = htole32(active ? 1u : 0u); /* probe for SSID 0 */
+    c.flags = htole32(chan_flags);
     used++;
   }
   cp.count = used;

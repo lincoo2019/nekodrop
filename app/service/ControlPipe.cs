@@ -63,12 +63,33 @@ public sealed class ControlPipe(Supervisor sup)
                 switch ((string?)cmd?["do"])
                 {
                     case "status": await Send(writer, sup.Snapshot()); break;
-                    case "wake": sup.Wake(); break;
+                    case "wake": sup.Wake(retry: (bool?)cmd?["retry"] == true); break;
                     case "touch": sup.Touch(); break;
                     case "stop": sup.Stop("asked by the client", giveBack: true); break;
                     case "mode":
                         if (Enum.TryParse<NetMode>((string?)cmd?["mode"], true, out var m)) sup.SetMode(m);
                         break;
+                    case "fast-unlock": sup.SetFastUnlock((bool?)cmd?["on"] ?? false); break;
+                    case "coex-plan": sup.SetCoexPlan((bool?)cmd?["on"] ?? false); break;
+                    case "high-throughput": sup.SetHighThroughput((bool?)cmd?["on"] ?? false); break;
+                    case "cards":
+                    {
+                        // For the manual choice: the PCI network controllers and the models a card can be run as.
+                        var candidates = new JsonArray();
+                        foreach (var c in Card.Candidates())
+                            candidates.Add(new JsonObject { ["hw"] = c.HardwareId, ["name"] = c.Name, ["recognized"] = c.Recognized });
+                        var models = new JsonArray();
+                        foreach (var model in CardCatalog.ManualModels)
+                            models.Add(new JsonObject { ["key"] = model.Key, ["name"] = model.Name, ["vendor"] = model.VendorId });
+                        await Send(writer, new JsonObject { ["event"] = "cards", ["candidates"] = candidates, ["models"] = models });
+                        break;
+                    }
+                    case "card-manual":
+                    {
+                        var why = sup.SetManualCard((string?)cmd?["hw"] ?? "", (string?)cmd?["model"] ?? "");
+                        await Send(writer, new JsonObject { ["event"] = "card-manual", ["error"] = why });
+                        break;
+                    }
                     case "wifi-scan": sup.WifiScan((string?)cmd?["ssid"]); break;
                     case "wifi-connect":
                     {

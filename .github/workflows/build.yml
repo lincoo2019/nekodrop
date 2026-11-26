@@ -16,6 +16,12 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+      - name: Rust (Apple ID sign-in)
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --target x86_64-pc-windows-msvc,i686-pc-windows-msvc
+          rustup default stable
+          cargo --version
       - name: Inno Setup
         run: choco install innosetup --no-progress -y
       - name: Fetch dependencies
@@ -24,6 +30,30 @@ jobs:
       - name: Build
         shell: pwsh
         run: .\scripts\build-installer.ps1
+      - name: Bluetooth beacon script (dry run, Windows PowerShell 5.1)
+        shell: pwsh
+        run: |
+          $out = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File installer\airdrop-beacon.ps1 -DryRun
+          "$out"
+          if ("$out" -notmatch '^would advertise \d+ bytes$') { throw "beacon dry run: $out" }
+      - name: UI snapshots (sample devices, light and dark)
+        shell: pwsh
+        run: |
+          $exe = 'build\stage\nekodrop.exe'
+          foreach ($v in @(@('light', 'zh'), @('dark', 'zh'), @('light', 'en'), @('colourful', 'zh'))) {
+            $out = "build\snapshots\$($v[0])-$($v[1])"
+            $look = if ($v[0] -eq 'colourful') { @('--light', '--colourful') } else { @("--$($v[0])") }
+            $p = Start-Process $exe -ArgumentList (@('--snapshot', $out) + $look + @('--lang', $v[1])) -PassThru
+            if (-not $p.WaitForExit(60000)) { $p.Kill(); throw "snapshot $($v -join '-') hung" }
+            $png = @(Get-ChildItem $out -Filter *.png -ErrorAction SilentlyContinue)
+            "$out`: $($png.Name -join ', ')"
+            if ($png.Count -lt 5) { throw "snapshot $($v -join '-'): $($png.Count) images" }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-snapshots
+          path: build/snapshots
+          if-no-files-found: error
       - name: SHA-256
         shell: pwsh
         run: Get-ChildItem build\nekodrop-*-setup.exe | Get-FileHash -Algorithm SHA256 | Format-List

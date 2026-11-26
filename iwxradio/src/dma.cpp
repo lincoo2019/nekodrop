@@ -63,7 +63,7 @@ bool DmaPool::init(size_t pages, size_t min_pages, std::string &error) {
   std::sort(frames.begin(), frames.end());
   _frames.assign(frames.begin(), frames.end());
   _taken.assign(_frames.size(), false);
-  _back = _frames.size();
+  _runs.reset(_frames);
   _view = static_cast<uint8_t *>(
       VirtualAlloc(nullptr, _frames.size() * kPageBytes, MEM_RESERVE | MEM_PHYSICAL, PAGE_READWRITE));
   if (!_view || !MapUserPhysicalPages(_view, frames.size(), frames.data())) {
@@ -71,6 +71,57 @@ bool DmaPool::init(size_t pages, size_t min_pages, std::string &error) {
     return false;
   }
   return true;
+}
+
+bool DmaPool::grow(size_t pages, std::string &error) {
+  if (_used_pages || !_reserved.empty() || !_view) {
+    error = "the DMA pool can only grow before it is used";
+    return false;
+  }
+  std::vector<ULONG_PTR> more(pages);
+  ULONG_PTR got = pages;
+  if (!AllocateUserPhysicalPages(GetCurrentProcess(), &got, more.data()) || !got) {
+    error = "no more lockable pages (" + std::to_string(GetLastError()) + ")";
+    return false;
+  }
+  more.resize(got);
+  // Unmap the old view; the frames stay locked and join the new, larger one.
+  MapUserPhysicalPages(_view, _frames.size(), nullptr);
+  VirtualFree(_view, 0, MEM_RELEASE);
+  _view = nullptr;
+  std::vector<ULONG_PTR> all(_frames.begin(), _frames.end());
+  all.insert(all.end(), more.begin(), more.end());
+  std::sort(all.begin(), all.end());
+  _frames.assign(all.begin(), all.end());
+  _taken.assign(_frames.size(), false);
+  _runs.reset(_frames);
+  _view = static_cast<uint8_t *>(
+      VirtualAlloc(nullptr, all.size() * kPageBytes, MEM_RESERVE | MEM_PHYSICAL, PAGE_READWRITE));
+  if (!_view || !MapUserPhysicalPages(_view, all.size(), all.data())) {
+    error = "mapping the grown DMA pool failed (" + std::to_string(GetLastError()) + ")";
+    if (_view) VirtualFree(_view, 0, MEM_RELEASE);
+    _view = nullptr;
+    return false;
+  }
+  return true;
+}
+
+bool DmaPool::fits(std::vector<size_t> runs) const {
+  return _view && _runs.can_reserve(runs);
+}
+
+bool DmaPool::reserve_runs(std::vector<size_t> runs) {
+  if (!_view || _used_pages || !_reserved.empty()) return false;
+  auto planned = _runs.reserve(std::move(runs));
+  if (!planned) return false;
+  _reserved = std::move(*planned);
+  return true;
+}
+
+uint64_t DmaPool::available_bytes() {
+  MEMORYSTATUSEX m{};
+  m.dwLength = sizeof(m);
+  return GlobalMemoryStatusEx(&m) ? m.ullAvailPhys : 0;
 }
 
 DmaBuf DmaPool::page_at(size_t index) {
@@ -85,20 +136,13 @@ DmaBuf DmaPool::page_at(size_t index) {
 }
 
 DmaBuf DmaPool::alloc_page() {
-  if (!_spare.empty()) {
-    const size_t i = _spare.back();
-    _spare.pop_back();
-    return page_at(i);
-  }
-  /* Single pages come from the far end, so runs of adjacent frames near the
-   * front stay whole for the buffers that need them. */
-  while (_back > _cursor && _taken[_back - 1]) _back--;
-  if (_back <= _cursor) return {};
-  return page_at(--_back);
+  if (!_view) return {};
+  const auto page = _runs.take(1);
+  return page ? page_at(*page) : DmaBuf{};
 }
 
 DmaBuf DmaPool::alloc(size_t size, size_t align) {
-  if (!size || align > kPageBytes || (align & (align - 1))) return {};
+  if (!_view || !size || !align || align > kPageBytes || (align & (align - 1))) return {};
   if (size <= kPageBytes) {
     /* Pack small buffers into one page. */
     const size_t start = (_part_used + align - 1) & ~(align - 1);
@@ -116,31 +160,22 @@ DmaBuf DmaPool::alloc(size_t size, size_t align) {
     b.size = size;
     return b;
   }
-  /* A run of adjacent frames; frames skipped on the way are kept as spares. */
   const size_t n = (size + kPageBytes - 1) / kPageBytes;
-  size_t i = _cursor;
-  while (i + n <= _back) {
-    size_t k = 0;
-    while (k < n && !_taken[i + k] && (k == 0 || _frames[i + k] == _frames[i] + k)) k++;
-    if (k == n) {
-      for (size_t j = _cursor; j < i; j++)
-        if (!_taken[j]) _spare.push_back(j);
-      DmaBuf b;
-      b.va = _view + i * kPageBytes;
-      b.pa = static_cast<uint64_t>(_frames[i]) * kPageBytes;
-      b.size = size;
-      for (size_t j = 0; j < n; j++) {
-        _taken[i + j] = true;
-        _used_pages++;
-      }
-      std::memset(b.va, 0, n * kPageBytes);
-      if (i == _cursor) _cursor = i + n;
-      else _cursor = std::max(_cursor, i + n);
-      return b;
-    }
-    i += k ? k : 1;
+  std::optional<size_t> first;
+  auto held = _reserved.find(n);
+  if (held != _reserved.end()) {
+    first = held->second;
+    _reserved.erase(held);
+  } else {
+    first = _runs.take(n);
   }
-  return {};
+  if (!first) return {};
+  const size_t i = *first;
+  DmaBuf b{_view + i * kPageBytes, uint64_t(_frames[i]) * kPageBytes, size};
+  for (size_t j = 0; j < n; j++) _taken[i + j] = true;
+  _used_pages += n;
+  std::memset(b.va, 0, n * kPageBytes);
+  return b;
 }
 
 void DmaPool::trim() {
@@ -152,28 +187,16 @@ void DmaPool::trim() {
     _frames[i] = 0;
     _taken[i] = true; /* never hand it out again */
   }
-  _spare.clear();
+  _runs.clear();
+  _reserved.clear();
   ULONG_PTR n = unused.size();
   if (n) FreeUserPhysicalPages(GetCurrentProcess(), &n, unused.data());
 }
 
 size_t DmaPool::longest_run() const {
-  size_t best = 0, run = 0;
-  for (size_t i = 0; i < _frames.size(); i++) {
-    run = (i && _frames[i] && _frames[i] == _frames[i - 1] + 1) ? run + 1 : 1;
-    best = std::max(best, run);
-  }
-  return best;
+  return _runs.longest();
 }
 
 size_t DmaPool::runs_of(size_t n) const {
-  size_t count = 0, run = 0;
-  for (size_t i = 0; i < _frames.size(); i++) {
-    run = (i && _frames[i] && _frames[i] == _frames[i - 1] + 1) ? run + 1 : 1;
-    if (run == n) {
-      count++;
-      run = 0;
-    }
-  }
-  return count;
+  return _runs.count_runs(n);
 }

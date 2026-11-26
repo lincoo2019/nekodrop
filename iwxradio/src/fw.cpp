@@ -41,6 +41,12 @@ uint8_t Firmware::cmd_version(uint8_t group, uint8_t cmd) const {
   return IWX_FW_CMD_VER_UNKNOWN;
 }
 
+uint8_t Firmware::notif_version(uint8_t group, uint8_t cmd) const {
+  for (const auto &v : cmd_versions)
+    if (v.group == group && v.cmd == cmd) return v.notif_ver;
+  return IWX_FW_CMD_VER_UNKNOWN;
+}
+
 bool Firmware::load(const std::string &path, std::string &error) {
   if (!plat_read_file(path, raw, error)) return false;
   const size_t got = raw.size();
@@ -109,6 +115,10 @@ bool Firmware::load(const std::string &path, std::string &error) {
     case IWX_UCODE_TLV_IML:
       iml = data;
       iml_len = tlv_len;
+      break;
+    case IWX_UCODE_TLV_PNVM_DATA:
+      pnvm = data;
+      pnvm_len = tlv_len;
       break;
     case IWX_UCODE_TLV_CMD_VERSIONS:
       cmd_versions.clear();

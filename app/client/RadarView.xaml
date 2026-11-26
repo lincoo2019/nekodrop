@@ -1,0 +1,473 @@
+<UserControl x:Class="NekoDrop.RadarView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:NekoDrop"
+             Foreground="{DynamicResource Text}">
+  <UserControl.Resources>
+    <!-- A button that draws nothing of its own -->
+    <Style x:Key="Bare" TargetType="Button">
+      <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="AllowDrop" Value="True"/>
+      <!-- The focus ring only when moving with the keyboard, not after a click -->
+      <Setter Property="FocusVisualStyle">
+        <Setter.Value>
+          <Style>
+            <Setter Property="Control.Template">
+              <Setter.Value>
+                <ControlTemplate>
+                  <Border CornerRadius="10" BorderThickness="2" BorderBrush="{DynamicResource Accent}"/>
+                </ControlTemplate>
+              </Setter.Value>
+            </Setter>
+          </Style>
+        </Setter.Value>
+      </Setter>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border Background="Transparent" CornerRadius="10">
+              <ContentPresenter/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- Status text colour by the send's state -->
+    <Style x:Key="StateText" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="11"/>
+      <Setter Property="Foreground" Value="{DynamicResource Text3}"/>
+      <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+      <Style.Triggers>
+        <DataTrigger Binding="{Binding State}" Value="asking"><Setter Property="Foreground" Value="{DynamicResource Accent}"/></DataTrigger>
+        <DataTrigger Binding="{Binding State}" Value="sending"><Setter Property="Foreground" Value="{DynamicResource Accent}"/></DataTrigger>
+        <DataTrigger Binding="{Binding State}" Value="sent"><Setter Property="Foreground" Value="{DynamicResource Success}"/></DataTrigger>
+        <DataTrigger Binding="{Binding State}" Value="declined"><Setter Property="Foreground" Value="{DynamicResource Declined}"/></DataTrigger>
+        <DataTrigger Binding="{Binding State}" Value="failed"><Setter Property="Foreground" Value="{DynamicResource FailedText}"/></DataTrigger>
+      </Style.Triggers>
+    </Style>
+
+    <!-- The rings around a device's icon, one per state -->
+    <Style x:Key="WaitRing" TargetType="Ellipse">
+      <Setter Property="Visibility" Value="Collapsed"/>
+      <Setter Property="Stroke" Value="{DynamicResource Accent}"/>
+      <Setter Property="StrokeThickness" Value="2.5"/>
+      <Setter Property="StrokeDashArray" Value="2.4 2"/>
+      <Setter Property="StrokeDashCap" Value="Round"/>
+      <Style.Triggers>
+        <DataTrigger Binding="{Binding State}" Value="asking">
+          <Setter Property="Visibility" Value="Visible"/>
+          <DataTrigger.EnterActions>
+            <BeginStoryboard x:Name="spin">
+              <Storyboard>
+                <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
+                                 From="0" To="360" Duration="0:0:1.6" RepeatBehavior="Forever"/>
+              </Storyboard>
+            </BeginStoryboard>
+          </DataTrigger.EnterActions>
+          <DataTrigger.ExitActions><StopStoryboard BeginStoryboardName="spin"/></DataTrigger.ExitActions>
+        </DataTrigger>
+      </Style.Triggers>
+    </Style>
+    <Style x:Key="SendRing" TargetType="local:ProgressRing">
+      <Setter Property="Visibility" Value="Collapsed"/>
+      <Setter Property="Stroke" Value="{DynamicResource Accent}"/>
+      <Setter Property="Track" Value="{DynamicResource Border}"/>
+      <Setter Property="Thickness" Value="3"/>
+      <Style.Triggers>
+        <DataTrigger Binding="{Binding State}" Value="sending"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+      </Style.Triggers>
+    </Style>
+    <Style x:Key="OutcomeRing" TargetType="Ellipse">
+      <Setter Property="Visibility" Value="Collapsed"/>
+      <Setter Property="StrokeThickness" Value="2.5"/>
+      <Style.Triggers>
+        <DataTrigger Binding="{Binding State}" Value="sent">
+          <Setter Property="Visibility" Value="Visible"/><Setter Property="Stroke" Value="{DynamicResource Success}"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding State}" Value="declined">
+          <Setter Property="Visibility" Value="Visible"/><Setter Property="Stroke" Value="{DynamicResource Declined}"/><Setter Property="StrokeThickness" Value="2"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding State}" Value="failed">
+          <Setter Property="Visibility" Value="Visible"/><Setter Property="Stroke" Value="{DynamicResource Failed}"/><Setter Property="StrokeThickness" Value="2"/>
+        </DataTrigger>
+      </Style.Triggers>
+    </Style>
+    <!-- The device's own glyph, or a check once sent -->
+    <Style x:Key="NodeGlyph" TargetType="TextBlock">
+      <Setter Property="FontFamily" Value="{DynamicResource IconFont}"/>
+      <Setter Property="Text" Value="{Binding Glyph}"/>
+      <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+      <Setter Property="HorizontalAlignment" Value="Center"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+    </Style>
+
+    <!-- The bubble a sender's request opens under (or, low on the radar, above) its icon -->
+    <Style x:Key="AskBubble" TargetType="Border">
+      <Setter Property="Width" Value="140"/>
+      <Setter Property="Height" Value="70"/>
+      <Setter Property="CornerRadius" Value="10"/>
+      <Setter Property="Padding" Value="8,7"/>
+      <Setter Property="Background" Value="{DynamicResource MicaSolid}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource Accent}"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Effect"><Setter.Value><DropShadowEffect BlurRadius="14" ShadowDepth="3" Opacity="0.16"/></Setter.Value></Setter>
+    </Style>
+    <Style x:Key="SmallPrimary" TargetType="Button" BasedOn="{StaticResource WinPrimary}">
+      <Setter Property="FontSize" Value="11"/>
+      <Setter Property="Padding" Value="0,4"/>
+    </Style>
+    <Style x:Key="SmallButton" TargetType="Button" BasedOn="{StaticResource WinButton}">
+      <Setter Property="FontSize" Value="11"/>
+      <Setter Property="Padding" Value="0,4"/>
+    </Style>
+
+    <!-- A device on the radar: a 50 px circle on the orbit, name and status below -->
+    <DataTemplate x:Key="RadarNode" DataType="local:Device">
+      <Grid Width="112">
+        <Button x:Name="node" Style="{StaticResource Bare}" Tag="{Binding}" Click="Node_Click"
+                DragEnter="Node_DragEnter" DragOver="Node_DragOver" DragLeave="Node_DragLeave" Drop="Node_Drop"
+                RenderTransformOrigin="0.5,0.27" VerticalAlignment="Top"
+                AutomationProperties.Name="{Binding Name}" AutomationProperties.HelpText="{Binding Status}">
+          <Button.RenderTransform>
+            <TransformGroup>
+              <ScaleTransform x:Name="grow"/>
+              <ScaleTransform x:Name="enter"/>
+              <ScaleTransform x:Name="pop"/>
+              <TranslateTransform x:Name="shake"/>
+            </TransformGroup>
+          </Button.RenderTransform>
+          <StackPanel Margin="0,4">
+            <Grid Width="50" Height="50" HorizontalAlignment="Center">
+              <!-- A request: a soft accent halo that breathes -->
+              <Ellipse x:Name="AskGlow" Margin="-5" Fill="{DynamicResource AccentSubtle}" Visibility="Hidden" RenderTransformOrigin="0.5,0.5">
+                <Ellipse.RenderTransform><ScaleTransform x:Name="askBreath"/></Ellipse.RenderTransform>
+              </Ellipse>
+              <Ellipse x:Name="Glow" Margin="-6" Fill="{DynamicResource AccentSubtle}" Visibility="Hidden"/>
+              <Ellipse x:Name="Disc" Fill="{DynamicResource CardHover}" Stroke="{DynamicResource BorderStrong}" StrokeThickness="1"/>
+              <Ellipse x:Name="outcome" Style="{StaticResource OutcomeRing}" Margin="1"/>
+              <!-- Its own transform, not the style's: a style's is frozen and cannot turn -->
+              <Ellipse Style="{StaticResource WaitRing}" Margin="1" RenderTransformOrigin="0.5,0.5">
+                <Ellipse.RenderTransform><RotateTransform/></Ellipse.RenderTransform>
+              </Ellipse>
+              <local:ProgressRing x:Name="sendRing" Style="{StaticResource SendRing}" Progress="{Binding Progress}" Margin="1"/>
+              <TextBlock x:Name="nodeGlyph" Style="{StaticResource NodeGlyph}" FontSize="19"/>
+              <!-- Sent: a check drawn stroke by stroke -->
+              <Path x:Name="check" Data="M16,25.5 L22,31.5 L34.5,19" Stroke="{DynamicResource Success}" StrokeThickness="2.6"
+                    StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" StrokeDashArray="12 12" StrokeDashOffset="12"
+                    Visibility="Collapsed" IsHitTestVisible="False"/>
+              <!-- A ring that leaves the icon once: blue when the files set off, green when they arrive -->
+              <Ellipse x:Name="wave" StrokeThickness="2" Opacity="0" IsHitTestVisible="False" RenderTransformOrigin="0.5,0.5" Stroke="{DynamicResource Accent}">
+                <Ellipse.RenderTransform><ScaleTransform x:Name="waveScale"/></Ellipse.RenderTransform>
+              </Ellipse>
+            </Grid>
+            <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="SemiBold" TextAlignment="Center"
+                       TextTrimming="CharacterEllipsis" Margin="2,4,2,0" ToolTip="{Binding Name}"/>
+            <TextBlock x:Name="status" Text="{Binding Status}" Style="{StaticResource StateText}" TextAlignment="Center"
+                       TextWrapping="NoWrap" Margin="-20,1,-20,0" ToolTip="{Binding Status}"/>
+          </StackPanel>
+        </Button>
+
+        <!-- The request: wants to send…, accept / decline; then receiving with a bar -->
+        <Canvas x:Name="bubbleHost" Visibility="Collapsed" Panel.ZIndex="5">
+          <Grid x:Name="bubble" Canvas.Left="-14" Canvas.Top="98" RenderTransformOrigin="0.5,0">
+            <Grid.RenderTransform><ScaleTransform x:Name="bubbleScale"/></Grid.RenderTransform>
+            <Path x:Name="notchUp" Data="M0,6 L6,0 L12,6" Fill="{DynamicResource MicaSolid}" Stroke="{DynamicResource Accent}" StrokeThickness="1"
+                  HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,-5,0,0" Panel.ZIndex="1"/>
+            <Path x:Name="notchDown" Data="M0,0 L6,6 L12,0" Fill="{DynamicResource MicaSolid}" Stroke="{DynamicResource Accent}" StrokeThickness="1"
+                  HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,-5" Panel.ZIndex="1" Visibility="Collapsed"/>
+            <Border Style="{StaticResource AskBubble}" DataContext="{Binding Ask}">
+              <Grid>
+                <StackPanel x:Name="asking" VerticalAlignment="Center">
+                  <TextBlock Text="{Binding Wants}" FontSize="11" FontWeight="SemiBold" TextAlignment="Center"
+                             TextTrimming="CharacterEllipsis" ToolTip="{Binding Wants}"/>
+                  <UniformGrid Columns="2" Margin="0,6,0,0">
+                    <Button Style="{StaticResource SmallPrimary}" Content="{local:T accept}" Tag="{Binding Id}" Click="Accept_Click" Margin="0,0,3,0"/>
+                    <Button Style="{StaticResource SmallButton}" Content="{local:T decline}" Tag="{Binding Id}" Click="Decline_Click" Margin="3,0,0,0"/>
+                  </UniformGrid>
+                </StackPanel>
+              </Grid>
+            </Border>
+          </Grid>
+        </Canvas>
+      </Grid>
+      <DataTemplate.Triggers>
+        <!-- Found: fades in and grows from 60 % with a slight overshoot -->
+        <EventTrigger SourceName="node" RoutedEvent="FrameworkElement.Loaded">
+          <BeginStoryboard>
+            <Storyboard>
+              <DoubleAnimation Storyboard.TargetName="node" Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.25"/>
+              <DoubleAnimation Storyboard.TargetName="enter" Storyboard.TargetProperty="ScaleX" From="0.8" To="1" Duration="0:0:0.4">
+                <DoubleAnimation.EasingFunction><local:FluentEase/></DoubleAnimation.EasingFunction>
+              </DoubleAnimation>
+              <DoubleAnimation Storyboard.TargetName="enter" Storyboard.TargetProperty="ScaleY" From="0.8" To="1" Duration="0:0:0.4">
+                <DoubleAnimation.EasingFunction><local:FluentEase/></DoubleAnimation.EasingFunction>
+              </DoubleAnimation>
+            </Storyboard>
+          </BeginStoryboard>
+        </EventTrigger>
+        <Trigger SourceName="node" Property="IsMouseOver" Value="True">
+          <Trigger.EnterActions>
+            <BeginStoryboard>
+              <Storyboard>
+                <DoubleAnimation Storyboard.TargetName="grow" Storyboard.TargetProperty="ScaleX" To="1.05" Duration="0:0:0.15"/>
+                <DoubleAnimation Storyboard.TargetName="grow" Storyboard.TargetProperty="ScaleY" To="1.05" Duration="0:0:0.15"/>
+              </Storyboard>
+            </BeginStoryboard>
+          </Trigger.EnterActions>
+          <Trigger.ExitActions>
+            <BeginStoryboard>
+              <Storyboard>
+                <DoubleAnimation Storyboard.TargetName="grow" Storyboard.TargetProperty="ScaleX" To="1" Duration="0:0:0.15"/>
+                <DoubleAnimation Storyboard.TargetName="grow" Storyboard.TargetProperty="ScaleY" To="1" Duration="0:0:0.15"/>
+              </Storyboard>
+            </BeginStoryboard>
+          </Trigger.ExitActions>
+        </Trigger>
+        <!-- Off they go: a blue ring leaves the icon once -->
+        <DataTrigger Binding="{Binding State}" Value="sending">
+          <DataTrigger.EnterActions>
+            <BeginStoryboard>
+              <Storyboard>
+                <DoubleAnimation Storyboard.TargetName="waveScale" Storyboard.TargetProperty="ScaleX" From="1" To="1.7" Duration="0:0:0.6">
+                  <DoubleAnimation.EasingFunction><local:FluentEase/></DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+                <DoubleAnimation Storyboard.TargetName="waveScale" Storyboard.TargetProperty="ScaleY" From="1" To="1.7" Duration="0:0:0.6">
+                  <DoubleAnimation.EasingFunction><local:FluentEase/></DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+                <DoubleAnimation Storyboard.TargetName="wave" Storyboard.TargetProperty="Opacity" From="0.6" To="0" Duration="0:0:0.6"/>
+              </Storyboard>
+            </BeginStoryboard>
+          </DataTrigger.EnterActions>
+        </DataTrigger>
+        <!-- Sent: the ring closes into green, the icon gives way to a check drawn in one stroke,
+             the circle swells a little and settles, and a green ring leaves it once -->
+        <DataTrigger Binding="{Binding State}" Value="sent">
+          <Setter TargetName="check" Property="Visibility" Value="Visible"/>
+          <Setter TargetName="wave" Property="Stroke" Value="{DynamicResource Success}"/>
+          <!-- The full blue ring stays a moment and fades as the green one comes -->
+          <Setter TargetName="sendRing" Property="Visibility" Value="Visible"/>
+          <DataTrigger.EnterActions>
+            <BeginStoryboard>
+              <Storyboard>
+                <DoubleAnimation Storyboard.TargetName="nodeGlyph" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.12"/>
+                <DoubleAnimation Storyboard.TargetName="sendRing" Storyboard.TargetProperty="Opacity" From="1" To="0" Duration="0:0:0.24"/>
+                <DoubleAnimation Storyboard.TargetName="outcome" Storyboard.TargetProperty="Opacity" From="0.4" To="1" Duration="0:0:0.16"/>
+                <DoubleAnimation Storyboard.TargetName="check" Storyboard.TargetProperty="StrokeDashOffset" From="12" To="0" BeginTime="0:0:0.06" Duration="0:0:0.26">
+                  <DoubleAnimation.EasingFunction><local:FluentEase X1="0.3" Y1="0.6" X2="0.2" Y2="1"/></DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+                <DoubleAnimationUsingKeyFrames Storyboard.TargetName="pop" Storyboard.TargetProperty="ScaleX">
+                  <EasingDoubleKeyFrame KeyTime="0:0:0.14" Value="1.1"><EasingDoubleKeyFrame.EasingFunction><local:FluentEase/></EasingDoubleKeyFrame.EasingFunction></EasingDoubleKeyFrame>
+                  <EasingDoubleKeyFrame KeyTime="0:0:0.46" Value="1"><EasingDoubleKeyFrame.EasingFunction><local:FluentEase/></EasingDoubleKeyFrame.EasingFunction></EasingDoubleKeyFrame>
+                </DoubleAnimationUsingKeyFrames>
+                <DoubleAnimationUsingKeyFrames Storyboard.TargetName="pop" Storyboard.TargetProperty="ScaleY">
+                  <EasingDoubleKeyFrame KeyTime="0:0:0.14" Value="1.1"><EasingDoubleKeyFrame.EasingFunction><local:FluentEase/></EasingDoubleKeyFrame.EasingFunction></EasingDoubleKeyFrame>
+                  <EasingDoubleKeyFrame KeyTime="0:0:0.46" Value="1"><EasingDoubleKeyFrame.EasingFunction><local:FluentEase/></EasingDoubleKeyFrame.EasingFunction></EasingDoubleKeyFrame>
+                </DoubleAnimationUsingKeyFrames>
+                <DoubleAnimation Storyboard.TargetName="waveScale" Storyboard.TargetProperty="ScaleX" From="1" To="1.8" BeginTime="0:0:0.08" Duration="0:0:0.7">
+                  <DoubleAnimation.EasingFunction><local:FluentEase/></DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+                <DoubleAnimation Storyboard.TargetName="waveScale" Storyboard.TargetProperty="ScaleY" From="1" To="1.8" BeginTime="0:0:0.08" Duration="0:0:0.7">
+                  <DoubleAnimation.EasingFunction><local:FluentEase/></DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+                <DoubleAnimation Storyboard.TargetName="wave" Storyboard.TargetProperty="Opacity" From="0.7" To="0" BeginTime="0:0:0.08" Duration="0:0:0.7"/>
+              </Storyboard>
+            </BeginStoryboard>
+          </DataTrigger.EnterActions>
+          <DataTrigger.ExitActions>
+            <BeginStoryboard>
+              <Storyboard>
+                <DoubleAnimation Storyboard.TargetName="nodeGlyph" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.15"/>
+                <DoubleAnimation Storyboard.TargetName="sendRing" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0"/>
+              </Storyboard>
+            </BeginStoryboard>
+          </DataTrigger.ExitActions>
+        </DataTrigger>
+        <!-- Declined: a short shake, once -->
+        <DataTrigger Binding="{Binding State}" Value="declined">
+          <DataTrigger.EnterActions>
+            <BeginStoryboard>
+              <Storyboard>
+                <DoubleAnimationUsingKeyFrames Storyboard.TargetName="shake" Storyboard.TargetProperty="X" Duration="0:0:0.26">
+                  <LinearDoubleKeyFrame KeyTime="0:0:0.065" Value="-4"/>
+                  <LinearDoubleKeyFrame KeyTime="0:0:0.195" Value="4"/>
+                  <LinearDoubleKeyFrame KeyTime="0:0:0.26" Value="0"/>
+                </DoubleAnimationUsingKeyFrames>
+              </Storyboard>
+            </BeginStoryboard>
+          </DataTrigger.EnterActions>
+        </DataTrigger>
+        <!-- Someone asks (waiting for answer): the halo breathes and the bubble opens; the status line gives way to it -->
+        <MultiDataTrigger>
+          <MultiDataTrigger.Conditions>
+            <Condition Binding="{Binding Ask, Converter={x:Static local:IsSet.Instance}}" Value="True"/>
+            <Condition Binding="{Binding Ask.Receiving}" Value="False"/>
+          </MultiDataTrigger.Conditions>
+          <Setter TargetName="bubbleHost" Property="Visibility" Value="Visible"/>
+          <Setter TargetName="AskGlow" Property="Visibility" Value="Visible"/>
+          <Setter TargetName="status" Property="Visibility" Value="Hidden"/>
+          <MultiDataTrigger.EnterActions>
+            <BeginStoryboard>
+              <Storyboard>
+                <DoubleAnimation Storyboard.TargetName="bubble" Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.2"/>
+                <DoubleAnimation Storyboard.TargetName="bubbleScale" Storyboard.TargetProperty="ScaleX" From="0.85" To="1" Duration="0:0:0.26">
+                  <DoubleAnimation.EasingFunction><local:FluentEase/></DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+                <DoubleAnimation Storyboard.TargetName="bubbleScale" Storyboard.TargetProperty="ScaleY" From="0.85" To="1" Duration="0:0:0.26">
+                  <DoubleAnimation.EasingFunction><local:FluentEase/></DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+              </Storyboard>
+            </BeginStoryboard>
+            <BeginStoryboard x:Name="askPulse">
+              <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                <DoubleAnimation Storyboard.TargetName="askBreath" Storyboard.TargetProperty="ScaleX" From="0.94" To="1.1" Duration="0:0:1.2">
+                  <DoubleAnimation.EasingFunction><SineEase EasingMode="EaseInOut"/></DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+                <DoubleAnimation Storyboard.TargetName="askBreath" Storyboard.TargetProperty="ScaleY" From="0.94" To="1.1" Duration="0:0:1.2">
+                  <DoubleAnimation.EasingFunction><SineEase EasingMode="EaseInOut"/></DoubleAnimation.EasingFunction>
+                </DoubleAnimation>
+              </Storyboard>
+            </BeginStoryboard>
+          </MultiDataTrigger.EnterActions>
+          <MultiDataTrigger.ExitActions><StopStoryboard BeginStoryboardName="askPulse"/></MultiDataTrigger.ExitActions>
+        </MultiDataTrigger>
+        <!-- Accepted (or auto-accepted): no bubble; this PC's ring and sender status show live progress -->
+        <DataTrigger Binding="{Binding Ask.Receiving}" Value="True">
+          <Setter TargetName="bubbleHost" Property="Visibility" Value="Collapsed"/>
+          <Setter TargetName="AskGlow" Property="Visibility" Value="Hidden"/>
+          <Setter TargetName="status" Property="Visibility" Value="Visible"/>
+          <Setter TargetName="status" Property="Text" Value="{Binding Ask.Status}"/>
+          <Setter TargetName="status" Property="Foreground" Value="{DynamicResource Accent}"/>
+        </DataTrigger>
+      </DataTemplate.Triggers>
+    </DataTemplate>
+
+    <!-- The same device as a row of the list -->
+    <DataTemplate x:Key="ListRow" DataType="local:Device">
+      <Border x:Name="row" Style="{StaticResource WinCard}" Padding="12,10" Margin="0,0,0,8" AllowDrop="True" Tag="{Binding}"
+              DragEnter="Node_DragEnter" DragOver="Node_DragOver" DragLeave="Node_DragLeave" Drop="Node_Drop">
+        <DockPanel>
+          <Grid DockPanel.Dock="Right" VerticalAlignment="Center" Margin="12,0,0,0">
+            <Button x:Name="send" Style="{StaticResource WinButton}" Content="{local:T dev.send}" Tag="{Binding}" Click="Node_Click" Padding="12,6"/>
+            <StackPanel x:Name="answer" Orientation="Horizontal" Visibility="Collapsed" DataContext="{Binding Ask}">
+              <Button Style="{StaticResource WinPrimary}" Content="{local:T accept}" Tag="{Binding Id}" Click="Accept_Click" Padding="12,6"/>
+              <Button Style="{StaticResource WinButton}" Content="{local:T decline}" Tag="{Binding Id}" Click="Decline_Click" Padding="12,6" Margin="6,0,0,0"/>
+            </StackPanel>
+            <TextBlock x:Name="waiting" Text="{local:T dev.waiting}" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource Accent}" Visibility="Collapsed"/>
+            <Border x:Name="bar" Width="96" Height="6" CornerRadius="3" Background="{DynamicResource Border}" Visibility="Collapsed" ClipToBounds="True">
+              <local:Bar Progress="{Binding Progress}" Fill="{DynamicResource Accent}"/>
+            </Border>
+            <Border x:Name="inbar" Width="96" Height="6" CornerRadius="3" Background="{DynamicResource Border}" Visibility="Collapsed" ClipToBounds="True">
+              <local:Bar Progress="{Binding Ask.Progress}" Fill="{DynamicResource Accent}"/>
+            </Border>
+            <StackPanel x:Name="done" Orientation="Horizontal" Visibility="Collapsed">
+              <TextBlock FontFamily="{DynamicResource IconFont}" Text="&#xE73E;" FontSize="12" Foreground="{DynamicResource Success}" VerticalAlignment="Center" Margin="0,1,4,0"/>
+              <TextBlock Text="{local:T dev.sent}" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource Success}"/>
+            </StackPanel>
+          </Grid>
+          <Grid DockPanel.Dock="Left" Width="36" Height="36" Margin="0,0,12,0">
+            <Ellipse Fill="{DynamicResource AccentSubtle}"/>
+            <TextBlock FontFamily="{DynamicResource IconFont}" Text="{Binding Glyph}" FontSize="15" Foreground="{DynamicResource Accent}"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Grid>
+          <StackPanel VerticalAlignment="Center">
+            <TextBlock Text="{Binding Name}" FontSize="13" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+            <TextBlock x:Name="listStatus" Text="{Binding Status}" Style="{StaticResource StateText}" FontSize="12"/>
+          </StackPanel>
+        </DockPanel>
+      </Border>
+      <DataTemplate.Triggers>
+        <Trigger SourceName="row" Property="IsMouseOver" Value="True">
+          <Setter TargetName="row" Property="Background" Value="{DynamicResource CardHover}"/>
+          <Setter TargetName="row" Property="BorderBrush" Value="{DynamicResource BorderStrong}"/>
+        </Trigger>
+        <DataTrigger Binding="{Binding State}" Value="asking">
+          <Setter TargetName="send" Property="Visibility" Value="Collapsed"/><Setter TargetName="waiting" Property="Visibility" Value="Visible"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding State}" Value="sending">
+          <Setter TargetName="send" Property="Visibility" Value="Collapsed"/><Setter TargetName="bar" Property="Visibility" Value="Visible"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding State}" Value="sent">
+          <Setter TargetName="send" Property="Visibility" Value="Collapsed"/><Setter TargetName="done" Property="Visibility" Value="Visible"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding Ask, Converter={x:Static local:IsSet.Instance}}" Value="True">
+          <Setter TargetName="send" Property="Visibility" Value="Collapsed"/><Setter TargetName="answer" Property="Visibility" Value="Visible"/>
+          <Setter TargetName="row" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+          <Setter TargetName="row" Property="Background" Value="{DynamicResource AccentSubtle}"/>
+        </DataTrigger>
+        <DataTrigger Binding="{Binding Ask.Receiving}" Value="True">
+          <Setter TargetName="answer" Property="Visibility" Value="Collapsed"/><Setter TargetName="inbar" Property="Visibility" Value="Visible"/>
+          <Setter TargetName="listStatus" Property="Text" Value="{Binding Ask.Status}"/>
+          <Setter TargetName="listStatus" Property="Foreground" Value="{DynamicResource Accent}"/>
+        </DataTrigger>
+      </DataTemplate.Triggers>
+    </DataTemplate>
+  </UserControl.Resources>
+
+  <DockPanel>
+    <!-- Header: section title and the radar / list switch -->
+    <Grid DockPanel.Dock="Top" Margin="0,0,0,12">
+      <TextBlock x:Name="Heading" Text="{local:T main.nearby}" Style="{StaticResource H14}" VerticalAlignment="Center"/>
+      <Border Style="{StaticResource SegmentBox}" HorizontalAlignment="Right">
+        <StackPanel Orientation="Horizontal">
+          <RadioButton x:Name="RadarChoice" Style="{StaticResource Segment}" Content="{local:T view.radar}" Tag="&#xEB44;"
+                       GroupName="view" Checked="View_Checked"/>
+          <RadioButton x:Name="ListChoice" Style="{StaticResource Segment}" Content="{local:T view.list}" Tag="&#xE8FD;"
+                       GroupName="view" Checked="View_Checked"/>
+        </StackPanel>
+      </Border>
+    </Grid>
+
+    <!-- The stage -->
+    <Border x:Name="Stage" Background="{DynamicResource RadarBg}" BorderBrush="{DynamicResource Border}" BorderThickness="1"
+            CornerRadius="12" ClipToBounds="True">
+      <Grid>
+        <!-- Radar -->
+        <Grid x:Name="RadarLayer" SizeChanged="RadarLayer_SizeChanged">
+          <Canvas x:Name="Rings" IsHitTestVisible="False"/>
+          <ItemsControl x:Name="RadarItems" ItemTemplate="{StaticResource RadarNode}" Focusable="False">
+            <ItemsControl.ItemsPanel><ItemsPanelTemplate><local:RadarPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+            <ItemsControl.ItemContainerStyle>
+              <!-- A device with an open request bubble stays above its neighbours -->
+              <Style TargetType="ContentPresenter">
+                <Style.Triggers>
+                  <DataTrigger Binding="{Binding Ask, Converter={x:Static local:IsSet.Instance}}" Value="True">
+                    <Setter Property="Panel.ZIndex" Value="10"/>
+                  </DataTrigger>
+                </Style.Triggers>
+              </Style>
+            </ItemsControl.ItemContainerStyle>
+          </ItemsControl>
+          <!-- Below the hub: looking, standby, starting -->
+          <StackPanel x:Name="Hint" VerticalAlignment="Bottom" Margin="20,0,20,16">
+            <TextBlock x:Name="HintTitle" FontSize="13" FontWeight="SemiBold" TextAlignment="Center" TextWrapping="Wrap"/>
+            <TextBlock x:Name="HintText" FontSize="12" Foreground="{DynamicResource Text3}" TextAlignment="Center" TextWrapping="Wrap" Margin="0,2,0,0"/>
+            <Button x:Name="HintButton" Style="{StaticResource WinPrimary}" HorizontalAlignment="Center" Margin="0,8,0,0" Padding="14,7" Click="HintButton_Click"/>
+          </StackPanel>
+        </Grid>
+
+        <!-- List -->
+        <ScrollViewer x:Name="ListLayer" VerticalScrollBarVisibility="Auto" Visibility="Collapsed" Padding="10,10,10,2">
+          <ItemsControl x:Name="ListItems" ItemTemplate="{StaticResource ListRow}" Focusable="False"/>
+        </ScrollViewer>
+
+        <!-- AirDrop is off, failed, or cannot run: what and what to do -->
+        <StackPanel x:Name="Blocked" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="24" Visibility="Collapsed" MaxWidth="360">
+          <Border Width="48" Height="48" CornerRadius="24" Background="{DynamicResource Card}" BorderBrush="{DynamicResource BorderStrong}"
+                  BorderThickness="1" HorizontalAlignment="Center" Margin="0,0,0,12">
+            <TextBlock x:Name="BlockedGlyph" FontFamily="{DynamicResource IconFont}" FontSize="22" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+          <TextBlock x:Name="BlockedTitle" FontSize="14" FontWeight="SemiBold" TextAlignment="Center" TextWrapping="Wrap"/>
+          <TextBlock x:Name="BlockedText" FontSize="12" Foreground="{DynamicResource Text2}" TextAlignment="Center" TextWrapping="Wrap"
+                     Margin="0,4,0,16" LineHeight="18"/>
+          <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+            <Button x:Name="BlockedAction" Style="{StaticResource WinPrimary}" Padding="14,8" Click="BlockedAction_Click"/>
+            <Button x:Name="BlockedReport" Style="{StaticResource WinButton}" Padding="12,8" Margin="8,0,0,0"
+                    Content="{local:T tray.report}" Click="Report_Click"/>
+          </StackPanel>
+        </StackPanel>
+      </Grid>
+    </Border>
+  </DockPanel>
+</UserControl>
